@@ -17,10 +17,12 @@ import {
   QrCode,
   Receipt,
 } from 'lucide-react';
-import { getTransactions, getTransactionStats } from '@/lib/blockchain';
+import { formatAddress, getTransactions, getTransactionStats } from '@/lib/blockchain';
+import { useAccount } from '@starknet-react/core';
 import Link from 'next/link';
 
 export default function DashboardPage() {
+  const { address, isConnected } = useAccount();
   const [transactions] = useState(getTransactions().slice(0, 5));
   const stats = getTransactionStats();
 
@@ -34,6 +36,11 @@ export default function DashboardPage() {
             <p className="mt-2 text-muted-foreground">
               Welcome back to your privacy-first payment hub
             </p>
+            {isConnected && address && (
+              <p className="mt-1 font-mono text-sm text-muted-foreground">
+                Connected wallet: {formatAddress(address, 8)}
+              </p>
+            )}
           </div>
           <div className="flex gap-3">
             <Button asChild className="hover:brightness-90">

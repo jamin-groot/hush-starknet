@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import localFont from 'next/font/local'
 import { Analytics } from '@vercel/analytics/next'
+import { StarknetProvider } from '@/components/starknet-provider'
 import './globals.css'
 
 const _figtree = localFont({
@@ -75,8 +76,10 @@ export default function RootLayout({
   return (
     <html lang="en" className={`dark ${_figtree.variable}`}>
       <body className="font-sans antialiased">
-        {children}
-        <Analytics />
+        <StarknetProvider>
+          {children}
+          <Analytics />
+        </StarknetProvider>
       </body>
     </html>
   )

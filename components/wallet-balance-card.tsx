@@ -4,19 +4,24 @@ import { useState } from 'react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Eye, EyeOff, Copy, Check, Wallet } from 'lucide-react';
-import { getWallet, formatAddress } from '@/lib/blockchain';
+import { useAccount } from '@starknet-react/core';
+import { formatAddress } from '@/lib/blockchain';
+import { useTokenBalance } from '@/hooks/useTokenBalance';
 
 export function WalletBalanceCard() {
-  const wallet = getWallet();
+  const { address, isConnected } = useAccount();
+  const { balance } = useTokenBalance();
+
   const [showBalance, setShowBalance] = useState(true);
   const [copied, setCopied] = useState(false);
 
-  // Mock exchange rate
-  const ethToUsd = 2500;
-  const balanceInUsd = parseFloat(wallet.balance) * ethToUsd;
+  // temp STRK price
+  const strkToUsd = 1;
+  const balanceInUsd = parseFloat(balance) * strkToUsd;
 
   const copyAddress = () => {
-    navigator.clipboard.writeText(wallet.address);
+    if (!address) return;
+    navigator.clipboard.writeText(address);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -35,6 +40,7 @@ export function WalletBalanceCard() {
               <p className="text-sm text-muted-foreground">Main Account</p>
             </div>
           </div>
+
           <Button
             variant="ghost"
             size="icon"
@@ -49,34 +55,49 @@ export function WalletBalanceCard() {
           </Button>
         </div>
 
-        {/* Balance Display */}
+        {/* Balance */}
         <div className="space-y-2">
           {showBalance ? (
             <>
               <div className="flex items-baseline gap-2">
                 <span className="font-mono text-4xl font-bold tracking-tight">
-                  {wallet.balance}
+                  {balance}
                 </span>
-                <span className="text-2xl font-semibold text-muted-foreground">ETH</span>
+                <span className="text-2xl font-semibold text-muted-foreground">
+                  STRK
+                </span>
               </div>
+
               <div className="text-lg text-muted-foreground">
-                ≈ ${balanceInUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                ≈ $
+                {balanceInUsd.toLocaleString('en-US', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}{' '}
+                USD
               </div>
             </>
           ) : (
             <div className="space-y-2">
-              <div className="font-mono text-4xl font-bold tracking-tight">••••••</div>
-              <div className="text-lg text-muted-foreground">Balance Hidden</div>
+              <div className="font-mono text-4xl font-bold tracking-tight">
+                ••••••
+              </div>
+              <div className="text-lg text-muted-foreground">
+                Balance Hidden
+              </div>
             </div>
           )}
         </div>
 
-        {/* Wallet Address */}
+        {/* Address */}
         <div className="flex items-center justify-between rounded-lg bg-[#20252B] p-4">
           <div>
             <p className="text-xs text-muted-foreground">Wallet Address</p>
-            <p className="mt-1 font-mono text-sm">{formatAddress(wallet.address, 8)}</p>
+            <p className="mt-1 font-mono text-sm">
+              {address ? formatAddress(address, 8) : 'Not connected'}
+            </p>
           </div>
+
           <Button
             variant="ghost"
             size="icon"
@@ -91,12 +112,12 @@ export function WalletBalanceCard() {
           </Button>
         </div>
 
-        {/* Network Info */}
+        {/* Network */}
         <div className="flex items-center justify-between text-sm">
           <span className="text-muted-foreground">Network</span>
           <div className="flex items-center gap-2">
             <div className="h-2 w-2 rounded-full bg-primary animate-pulse" />
-            <span className="font-medium">Starknet Mainnet</span>
+            <span className="font-medium">Starknet Sepolia</span>
           </div>
         </div>
       </div>
