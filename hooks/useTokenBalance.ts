@@ -15,7 +15,7 @@ const ERC20_ABI = [
 ];
 
 const STRK_ADDRESS =
-  '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6fbb7c6f7d3c6d0e3e3a4'; // Sepolia STRK
+  '0x04718f5a0fc34cc1af16a1b11f5dbebf0c7db8d19a0e7c5d6c0f5c5b5c5b5c5'; // Sepolia STRK
 
 export function useTokenBalance() {
   const { address } = useAccount();
@@ -33,7 +33,7 @@ export function useTokenBalance() {
           nodeUrl: 'https://starknet-sepolia.public.blastapi.io',
         });
 
-        const contract = new Contract(ERC20_ABI, STRK_ADDRESS, provider);
+        const contract = new Contract({ abi: ERC20_ABI, address: STRK_ADDRESS, providerOrAccount: provider });
         const result: any = await contract.balanceOf(address);
 
         const raw = result.balance.toString();

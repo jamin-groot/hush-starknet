@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { AppLayout } from '@/components/app-layout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,27 +17,23 @@ import {
 } from '@/components/ui/select';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Lock, Send, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
-import { sendTransaction, isValidAddress, getWallet } from '@/lib/blockchain';
-import type { Transaction } from '@/lib/blockchain';
+import { isValidAddress } from '@/lib/blockchain';
 import { encryptMessage } from '@/lib/crypto';
-import { useToast } from '@/hooks/use-toast';
-import { TransactionSuccessModal } from '@/components/transaction-success-modal';
+import { useSendStrk } from '@/hooks/useSendStrk';
+import { useTokenBalance } from '@/hooks/useTokenBalance';
 
 export default function SendPage() {
-  const router = useRouter();
-  const { toast } = useToast();
-  const wallet = getWallet();
+  const { sendStrk, isSending } = useSendStrk();
+  const { balance } = useTokenBalance();
 
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
-  const [token, setToken] = useState('ETH');
+  const [token, setToken] = useState('STRK');
   const [note, setNote] = useState('');
   const [isPrivate, setIsPrivate] = useState(false);
   const [isEncrypting, setIsEncrypting] = useState(false);
-  const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState('');
-  const [showSuccessModal, setShowSuccessModal] = useState(false);
-  const [completedTransaction, setCompletedTransaction] = useState<Transaction | null>(null);
+  const [txHash, setTxHash] = useState<string | null>(null);
 
   const isValidForm = isValidAddress(recipient) && parseFloat(amount) > 0;
 
@@ -48,13 +43,8 @@ export default function SendPage() {
       return;
     }
 
-    if (!wallet.isConnected) {
-      setError('Please connect your wallet first');
-      return;
-    }
-
     const amountNum = parseFloat(amount);
-    const walletBalance = parseFloat(wallet.balance);
+    const walletBalance = parseFloat(balance);
 
     if (amountNum > walletBalance) {
       setError('Insufficient balance');
@@ -62,55 +52,31 @@ export default function SendPage() {
     }
 
     setError('');
-    setIsSending(true);
 
     try {
-      let encryptedNote;
-      
-      // Encrypt note if private mode is enabled
       if (isPrivate && note) {
         setIsEncrypting(true);
-        const encrypted = await encryptMessage(note);
-        encryptedNote = JSON.stringify(encrypted);
+        await encryptMessage(note);
         setIsEncrypting(false);
       }
 
-      // Send transaction
-      const tx = await sendTransaction(
-        recipient,
-        amount,
-        token,
-        isPrivate ? undefined : note,
-        isPrivate ? encryptedNote : undefined,
-        isPrivate
-      );
-
-      // Show success modal
-      setCompletedTransaction(tx);
-      setShowSuccessModal(true);
-      setIsSending(false);
+      const hash = await sendStrk(recipient, amount);
+      setTxHash(hash);
     } catch (err) {
-      console.error('[v0] Transaction error:', err);
-      setError('Failed to send transaction. Please try again.');
-      setIsSending(false);
+      console.error('[hush] STRK transfer error:', err);
       setIsEncrypting(false);
-    }
-  };
 
-  const handleViewTransaction = () => {
-    setShowSuccessModal(false);
-    router.push('/transactions');
+      if (err instanceof Error) {
+        setError(err.message);
+        return;
+      }
+
+      setError('Failed to send transaction. Please try again.');
+    }
   };
 
   return (
     <AppLayout>
-      <TransactionSuccessModal
-        open={showSuccessModal}
-        onOpenChange={setShowSuccessModal}
-        transaction={completedTransaction}
-        onViewTransaction={handleViewTransaction}
-      />
-      
       <div className="mx-auto max-w-2xl space-y-6">
         {/* Header */}
         <div>
@@ -156,9 +122,7 @@ export default function SendPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="ETH">ETH</SelectItem>
-                    <SelectItem value="USDC">USDC</SelectItem>
-                    <SelectItem value="USDT">USDT</SelectItem>
+                    <SelectItem value="STRK">STRK</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -168,7 +132,7 @@ export default function SendPage() {
             <div className="rounded-lg bg-muted p-3 text-sm">
               <span className="text-muted-foreground">Available Balance: </span>
               <span className="font-mono font-semibold">
-                {wallet.balance} {token}
+                {balance} STRK
               </span>
             </div>
 
@@ -242,10 +206,16 @@ export default function SendPage() {
               ) : (
                 <>
                   <Send className="h-4 w-4" />
-                  Send {amount || '0.00'} {token}
+                  Send {amount || '0.00'} STRK
                 </>
               )}
             </Button>
+
+            {txHash && (
+              <p className="text-xs text-muted-foreground">
+                Last transaction hash: <span className="font-mono">{txHash}</span>
+              </p>
+            )}
           </div>
         </Card>
 
@@ -258,7 +228,7 @@ export default function SendPage() {
               <p className="text-sm leading-relaxed text-muted-foreground">
                 When you enable Privacy Mode, your transaction note is encrypted using AES-GCM
                 encryption with a 256-bit key derived from your wallet. The encrypted note is
-                stored on-chain, but only you and the recipient can decrypt it. Starknet's
+                stored on-chain, but only you and the recipient can decrypt it. Starknet&apos;s
                 zero-knowledge proofs ensure your transaction remains private and secure.
               </p>
             </div>
