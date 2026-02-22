@@ -1,5 +1,87 @@
 # Hush - Privacy-First Payments on Starknet
 
+Hush is a privacy-focused payment hub on Starknet Sepolia. It supports STRK transfers, optional encrypted transaction notes, realtime dashboard synchronization, and recipient-side decryption for private messages.
+
+## Core Features
+
+- Wallet connection with Argent/Braavos
+- STRK balance and transfer flow on Sepolia
+- Lifecycle-aware transactions (`pending`, `confirmed`, `failed`)
+- Realtime dashboard + transaction history synchronization
+- Encrypted private notes with recipient inbox visibility
+- Notification bell with lifecycle-linked transaction alerts
+
+## Realtime Sync Architecture
+
+The app now uses a centralized realtime layer:
+
+- `store/realtimeStore.ts`
+  - shared transactions list
+  - lifecycle-by-hash tracking
+  - balance snapshot
+  - encrypted message mapping
+  - notifications feed
+- Realtime hooks:
+  - `hooks/useRealtimeTransactions.ts`
+  - `hooks/useRealtimeBalance.ts`
+  - `hooks/useRealtimeMessages.ts`
+- Optimistic tx insertion on send, txHash remap after chain hash is returned, then confirmation/failure updates.
+
+## Privacy Notes (MVP)
+
+- Sender encrypts note for recipient.
+- Encrypted payload is stored via API and linked to tx hash.
+- Recipient decrypts locally and sees plaintext in transactions inbox.
+
+API routes:
+
+- `POST /api/privacy/register-key`
+- `GET /api/privacy/public-key/[address]`
+- `POST /api/privacy/messages`
+- `GET /api/privacy/messages?recipient=<address>`
+
+## Local Development
+
+1. Install:
+   - `npm install`
+2. Run:
+   - `npm run dev`
+3. Open:
+   - `http://localhost:3000`
+
+## Quick Test Flow
+
+1. Connect wallet.
+2. Send STRK transfer (with and without privacy note).
+3. Observe pending tx appears immediately.
+4. Observe lifecycle and balance update automatically.
+5. Open `/transactions` and verify message merge by `txHash`.
+6. Open notification bell and verify read/remove/mark-all behaviors and highlight navigation.
+
+## Screenshots
+
+### Dashboard STRK Balance
+
+![Dashboard STRK balance](docs/screenshots/dashboard-strk-balance.png)
+
+### Send Flow
+
+![Send flow](docs/screenshots/send-flow.png)
+
+### Notification Dropdown Rebuild
+
+![Notification dropdown](docs/screenshots/notification-dropdown.png)
+
+### Transfer Validation Error (resolved during implementation)
+
+![Transfer validation error](docs/screenshots/transfer-validation-error.png)
+
+## Notes
+
+- `data/privacy-store.json` is gitignored and used only for local/dev persistence.
+- This is an MVP architecture intended for hackathon/dev speed; production should use hardened key custody, auth, and durable backend storage.
+# Hush - Privacy-First Payments on Starknet
+
 Hush is a privacy-focused payment hub on Starknet Sepolia. It supports STRK transfers, optional encrypted transaction notes, and transaction lifecycle tracking with confirmation polling.
 
 ## Overview

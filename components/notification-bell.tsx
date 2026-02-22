@@ -1,14 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Bell, CheckCheck, Circle, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { Badge } from '@/components/ui/badge';
 import { useRealtimeStore } from '@/store/realtimeStore';
 import { formatAddress } from '@/lib/blockchain';
@@ -22,6 +17,7 @@ const getLifecycleVariant = (lifecycle?: 'pending' | 'confirmed' | 'failed') => 
 
 export function NotificationBell() {
   const router = useRouter();
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const notifications = useRealtimeStore((state) => state.notifications);
   const markNotificationRead = useRealtimeStore((state) => state.markNotificationRead);
   const markAllNotificationsRead = useRealtimeStore((state) => state.markAllNotificationsRead);
@@ -44,6 +40,34 @@ export function NotificationBell() {
     [notifications]
   );
 
+  useEffect(() => {
+    const onPointerDown = (event: MouseEvent) => {
+      if (!open) {
+        return;
+      }
+      const node = containerRef.current;
+      if (!node) {
+        return;
+      }
+      if (!node.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onEscape);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onEscape);
+    };
+  }, [open]);
+
   const handleNotificationClick = (id: string, txHash?: string) => {
     markNotificationRead(id);
     setOpen(false);
@@ -56,80 +80,97 @@ export function NotificationBell() {
   };
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative" aria-label="Notifications">
-          <Bell className={cn('h-5 w-5', animate && 'animate-bounce')} />
+    <div ref={containerRef} className="relative">
+      <div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="relative"
+          aria-label="Notifications"
+          aria-expanded={open}
+          onClick={() => setOpen((prev) => !prev)}
+        >
+          <Bell className={cn('h-5 w-5 transition-transform', animate && 'animate-bounce')} />
           {unreadCount > 0 && (
             <span className="absolute -right-1 -top-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
               {unreadCount > 99 ? '99+' : unreadCount}
             </span>
           )}
         </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-[380px] p-0">
-        <div className="flex items-center justify-between border-b px-4 py-3">
-          <h4 className="font-semibold">Notifications</h4>
-          {sorted.length > 0 && (
-            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={markAllNotificationsRead}>
-              <CheckCheck className="mr-1 h-3.5 w-3.5" />
-              Mark all read
-            </Button>
+      </div>
+
+      {open && (
+        <div className="animate-in fade-in-0 zoom-in-95 absolute right-0 top-full z-50 mt-2 w-[420px] overflow-hidden rounded-xl border border-border bg-card shadow-2xl duration-150">
+          <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
+            <h4 className="text-sm font-semibold">Notifications</h4>
+            {sorted.length > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px]"
+                onClick={markAllNotificationsRead}
+              >
+                <CheckCheck className="mr-1 h-3.5 w-3.5" />
+                Mark all read
+              </Button>
+            )}
+          </div>
+
+          {sorted.length === 0 ? (
+            <div className="px-4 py-10 text-center text-sm text-muted-foreground">
+              No notifications yet.
+            </div>
+          ) : (
+            <div className="max-h-96 overflow-y-auto overflow-x-hidden">
+              {sorted.map((item) => (
+                <div
+                  key={item.id}
+                  className={cn(
+                    'group border-b border-border/70 px-3 py-2.5 transition-colors hover:bg-muted/40',
+                    !item.read && 'bg-primary/5'
+                  )}
+                >
+                  <div className="flex items-start gap-1.5">
+                    <button
+                      className="flex-1 overflow-hidden text-left"
+                      onClick={() => handleNotificationClick(item.id, item.txHash)}
+                    >
+                      <div className="flex items-start justify-between gap-1.5">
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex items-center gap-1.5">
+                            {!item.read && <Circle className="h-2.5 w-2.5 shrink-0 fill-primary text-primary" />}
+                            <p className="truncate text-[13px] font-medium">{item.title}</p>
+                            {item.metadata?.lifecycle && (
+                              <Badge variant={getLifecycleVariant(item.metadata.lifecycle)} className="h-4 shrink-0 px-1.5 text-[10px]">
+                                {item.metadata.lifecycle}
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="line-clamp-2 text-[11px] text-muted-foreground">{item.description}</p>
+                          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-muted-foreground">
+                            <span>{new Date(item.timestamp).toLocaleString()}</span>
+                            {item.metadata?.address && <span>{formatAddress(item.metadata.address)}</span>}
+                            {item.metadata?.amount && <span>{item.metadata.amount} STRK</span>}
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 shrink-0 px-1.5 text-[11px] text-muted-foreground opacity-70 transition-opacity hover:text-foreground group-hover:opacity-100"
+                      onClick={() => removeNotification(item.id)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </div>
-
-        {sorted.length === 0 ? (
-          <div className="px-4 py-8 text-center text-sm text-muted-foreground">No notifications yet.</div>
-        ) : (
-          <div className="max-h-96 overflow-y-auto">
-            {sorted.map((item) => (
-              <div
-                key={item.id}
-                className={cn(
-                  'border-b px-4 py-3 transition-colors hover:bg-muted/50',
-                  !item.read && 'bg-primary/5'
-                )}
-              >
-                <button
-                  className="w-full text-left"
-                  onClick={() => handleNotificationClick(item.id, item.txHash)}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        {!item.read && <Circle className="h-2.5 w-2.5 fill-primary text-primary" />}
-                        <p className="text-sm font-medium">{item.title}</p>
-                        {item.metadata?.lifecycle && (
-                          <Badge variant={getLifecycleVariant(item.metadata.lifecycle)} className="h-5 text-[10px]">
-                            {item.metadata.lifecycle}
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="line-clamp-2 text-xs text-muted-foreground">{item.description}</p>
-                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                        <span>{new Date(item.timestamp).toLocaleString()}</span>
-                        {item.metadata?.address && <span>{formatAddress(item.metadata.address)}</span>}
-                        {item.metadata?.amount && <span>{item.metadata.amount} STRK</span>}
-                      </div>
-                    </div>
-                  </div>
-                </button>
-                <div className="mt-2 flex justify-end">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs text-muted-foreground"
-                    onClick={() => removeNotification(item.id)}
-                  >
-                    <Trash2 className="mr-1 h-3 w-3" />
-                    Remove
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      )}
+    </div>
   );
 }
