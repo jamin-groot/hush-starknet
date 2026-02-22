@@ -1,6 +1,7 @@
 'use client';
 
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import type { Transaction } from '@/lib/blockchain';
 import { getEncryptedNotesForRecipient, decryptTransactionNote } from '@/lib/privacy';
 import {
@@ -10,12 +11,38 @@ import {
 import { CallData, RpcProvider } from 'starknet';
 
 type LifecycleState = 'pending' | 'confirmed' | 'failed';
+type NotificationType =
+  | 'incoming_transfer'
+  | 'outgoing_pending'
+  | 'outgoing_confirmed'
+  | 'outgoing_failed'
+  | 'encrypted_note'
+  | 'private_message'
+  | 'tx_confirmed'
+  | 'tx_failed';
 
 interface RealtimeMessage {
   txHash: string;
   from: string;
   createdAt: number;
   plaintext: string;
+}
+
+interface RealtimeNotification {
+  id: string;
+  dedupeKey: string;
+  type: NotificationType;
+  title: string;
+  description: string;
+  timestamp: number;
+  read: boolean;
+  txHash?: string;
+  metadata?: {
+    messagePreview?: string;
+    amount?: string;
+    address?: string;
+    lifecycle?: LifecycleState;
+  };
 }
 
 interface RealtimeStats {
@@ -29,6 +56,7 @@ interface RealtimeState {
   walletAddress: string | null;
   transactions: Transaction[];
   messages: RealtimeMessage[];
+  notifications: RealtimeNotification[];
   lifecycleByHash: Record<string, LifecycleState>;
   balance: string;
   isSyncing: boolean;
@@ -40,6 +68,9 @@ interface RealtimeState {
   mapPendingHash: (pendingHash: string, realHash: string) => void;
   confirmTransaction: (txHash: string, realTx?: Transaction, balanceAfterConfirm?: string) => void;
   failTransaction: (txHash: string) => void;
+  markNotificationRead: (id: string) => void;
+  markAllNotificationsRead: () => void;
+  removeNotification: (id: string) => void;
 }
 
 const STRK_ADDRESS =
@@ -51,6 +82,7 @@ const RPC_ENDPOINTS = [
   'https://rpc.starknet-testnet.lava.build:443',
 ] as const;
 const POLL_INTERVAL_MS = 12000;
+const MAX_NOTIFICATIONS = 100;
 
 type ContractCaller = {
   callContract: (request: {
@@ -87,6 +119,24 @@ const computeStats = (transactions: Transaction[]): RealtimeStats => {
     totalTransactions: transactions.length,
     privateTransactions: transactions.filter((tx) => tx.isPrivate).length,
   };
+};
+
+const appendNotification = (
+  notifications: RealtimeNotification[],
+  notification: Omit<RealtimeNotification, 'id' | 'read' | 'timestamp'> & { timestamp?: number }
+): RealtimeNotification[] => {
+  if (notifications.some((entry) => entry.dedupeKey === notification.dedupeKey)) {
+    return notifications;
+  }
+
+  const next: RealtimeNotification = {
+    ...notification,
+    id: `${notification.dedupeKey}-${Date.now()}`,
+    read: false,
+    timestamp: notification.timestamp ?? Date.now(),
+  };
+
+  return [next, ...notifications].slice(0, MAX_NOTIFICATIONS);
 };
 
 const parseUint256FromCall = (result: unknown): bigint => {
@@ -258,169 +308,326 @@ const performRefresh = async (address: string, account?: unknown) => {
   }
 };
 
-export const useRealtimeStore = create<RealtimeState>((set, get) => ({
-  walletAddress: null,
-  transactions: [],
-  messages: [],
-  lifecycleByHash: {},
-  balance: '0.0000',
-  isSyncing: false,
-  stats: emptyStats(),
+export const useRealtimeStore = create<RealtimeState>()(
+  persist(
+    (set, get) => ({
+      walletAddress: null,
+      transactions: [],
+      messages: [],
+      notifications: [],
+      lifecycleByHash: {},
+      balance: '0.0000',
+      isSyncing: false,
+      stats: emptyStats(),
 
-  initialize: (address, account) => {
-    const normalized = normalize(address);
-    if (get().walletAddress !== normalized) {
-      set({
-        walletAddress: normalized,
-        transactions: [],
-        messages: [],
-        lifecycleByHash: {},
-        balance: '0.0000',
-        stats: emptyStats(),
-      });
-    }
+      initialize: (address, account) => {
+        const normalized = normalize(address);
+        if (get().walletAddress !== normalized) {
+          set({
+            walletAddress: normalized,
+            transactions: [],
+            messages: [],
+            lifecycleByHash: {},
+            balance: '0.0000',
+            stats: emptyStats(),
+          });
+        }
 
-    const run = async () => {
-      set({ isSyncing: true });
-      const data = await performRefresh(normalized, account);
-      if (data) {
-        set({
-          transactions: data.transactions,
-          messages: data.messages,
-          balance: data.balance,
-          stats: data.stats,
-          isSyncing: false,
+        const run = async () => {
+          set({ isSyncing: true });
+          const data = await performRefresh(normalized, account);
+          if (data) {
+            set((state) => {
+              let nextNotifications = state.notifications;
+              const oldTxByHash = new Map(state.transactions.map((tx) => [tx.hash, tx]));
+              const oldMessagesByHash = new Map(state.messages.map((msg) => [msg.txHash, msg]));
+
+              for (const tx of data.transactions) {
+                if (tx.type === 'receive' && tx.status === 'confirmed' && !oldTxByHash.has(tx.hash)) {
+                  nextNotifications = appendNotification(nextNotifications, {
+                    dedupeKey: `incoming:${tx.hash}`,
+                    type: 'incoming_transfer',
+                    title: 'Incoming transfer',
+                    description: `Received ${tx.amount} ${tx.token} from ${tx.from.slice(0, 10)}...`,
+                    txHash: tx.hash,
+                    metadata: {
+                      amount: tx.amount,
+                      address: tx.from,
+                      lifecycle: tx.status,
+                    },
+                  });
+                }
+
+                const previous = oldTxByHash.get(tx.hash);
+                if (previous && !previous.decryptedNote && tx.decryptedNote) {
+                  nextNotifications = appendNotification(nextNotifications, {
+                    dedupeKey: `encrypted-note:${tx.hash}`,
+                    type: 'encrypted_note',
+                    title: 'Encrypted note decrypted',
+                    description: tx.decryptedNote.slice(0, 90),
+                    txHash: tx.hash,
+                    metadata: {
+                      messagePreview: tx.decryptedNote.slice(0, 120),
+                    },
+                  });
+                }
+              }
+
+              for (const message of data.messages) {
+                if (!oldMessagesByHash.has(message.txHash)) {
+                  nextNotifications = appendNotification(nextNotifications, {
+                    dedupeKey: `private-message:${message.txHash}`,
+                    type: 'private_message',
+                    title: 'New private message',
+                    description: message.plaintext.slice(0, 90),
+                    txHash: message.txHash,
+                    metadata: {
+                      messagePreview: message.plaintext.slice(0, 120),
+                      address: message.from,
+                    },
+                    timestamp: message.createdAt,
+                  });
+                }
+              }
+
+              return {
+                transactions: data.transactions,
+                messages: data.messages,
+                notifications: nextNotifications,
+                balance: data.balance,
+                stats: data.stats,
+                isSyncing: false,
+              };
+            });
+          } else {
+            set({ isSyncing: false });
+          }
+        };
+
+        void run();
+
+        if (pollHandle) {
+          clearInterval(pollHandle);
+        }
+        pollHandle = setInterval(() => {
+          void run();
+        }, POLL_INTERVAL_MS);
+      },
+
+      stop: () => {
+        if (pollHandle) {
+          clearInterval(pollHandle);
+          pollHandle = null;
+        }
+      },
+
+      refreshNow: async (account) => {
+        const address = get().walletAddress;
+        if (!address) {
+          return;
+        }
+        set({ isSyncing: true });
+        const data = await performRefresh(address, account);
+        if (data) {
+          set({
+            transactions: data.transactions,
+            messages: data.messages,
+            balance: data.balance,
+            stats: data.stats,
+            isSyncing: false,
+          });
+        } else {
+          set({ isSyncing: false });
+        }
+      },
+
+      addOptimisticOutgoing: (tx, balanceAfterSend) => {
+        upsertTransactionHistory(tx);
+        set((state) => {
+          const next = [tx, ...state.transactions.filter((item) => item.hash !== tx.hash)];
+          return {
+            transactions: next,
+            notifications: appendNotification(state.notifications, {
+              dedupeKey: `outgoing-pending:${tx.hash}`,
+              type: 'outgoing_pending',
+              title: 'Outgoing transfer pending',
+              description: `Sending ${tx.amount} ${tx.token} to ${tx.to.slice(0, 10)}...`,
+              txHash: tx.hash,
+              metadata: {
+                amount: tx.amount,
+                address: tx.to,
+                lifecycle: 'pending',
+              },
+            }),
+            lifecycleByHash: {
+              ...state.lifecycleByHash,
+              [tx.hash]: 'pending',
+            },
+            balance: balanceAfterSend ?? state.balance,
+            stats: computeStats(next),
+          };
         });
-      } else {
-        set({ isSyncing: false });
-      }
-    };
+      },
 
-    void run();
+      mapPendingHash: (pendingHash, realHash) => {
+        set((state) => {
+          const txs = state.transactions.map((tx) => {
+            if (tx.hash !== pendingHash) {
+              return tx;
+            }
+            return {
+              ...tx,
+              hash: realHash,
+              status: 'pending',
+            } satisfies Transaction;
+          });
 
-    if (pollHandle) {
-      clearInterval(pollHandle);
-    }
-    pollHandle = setInterval(() => {
-      void run();
-    }, POLL_INTERVAL_MS);
-  },
+          const lifecycleByHash = { ...state.lifecycleByHash };
+          if (lifecycleByHash[pendingHash]) {
+            lifecycleByHash[realHash] = lifecycleByHash[pendingHash];
+            delete lifecycleByHash[pendingHash];
+          }
 
-  stop: () => {
-    if (pollHandle) {
-      clearInterval(pollHandle);
-      pollHandle = null;
-    }
-  },
+          return {
+            transactions: txs,
+            lifecycleByHash,
+          };
+        });
+      },
 
-  refreshNow: async (account) => {
-    const address = get().walletAddress;
-    if (!address) {
-      return;
-    }
-    set({ isSyncing: true });
-    const data = await performRefresh(address, account);
-    if (data) {
-      set({
-        transactions: data.transactions,
-        messages: data.messages,
-        balance: data.balance,
-        stats: data.stats,
-        isSyncing: false,
-      });
-    } else {
-      set({ isSyncing: false });
-    }
-  },
+      confirmTransaction: (txHash, realTx, balanceAfterConfirm) => {
+        set((state) => {
+          const txs = state.transactions.map((tx) => {
+            if (tx.hash !== txHash) {
+              return tx;
+            }
+            return {
+              ...(realTx ?? tx),
+              status: 'confirmed',
+            } satisfies Transaction;
+          });
+          const confirmed = txs.find((tx) => tx.hash === txHash);
+          let nextNotifications = state.notifications;
+          if (confirmed) {
+            nextNotifications = appendNotification(nextNotifications, {
+              dedupeKey: `outgoing-confirmed:${txHash}`,
+              type: 'outgoing_confirmed',
+              title: 'Transfer confirmed',
+              description: `${confirmed.amount} ${confirmed.token} confirmed on-chain.`,
+              txHash,
+              metadata: {
+                amount: confirmed.amount,
+                address: confirmed.to,
+                lifecycle: 'confirmed',
+              },
+            });
+            nextNotifications = appendNotification(nextNotifications, {
+              dedupeKey: `tx-confirmed:${txHash}`,
+              type: 'tx_confirmed',
+              title: 'Transaction accepted',
+              description: 'Your transaction was accepted on Starknet.',
+              txHash,
+              metadata: {
+                lifecycle: 'confirmed',
+              },
+            });
+          }
+          return {
+            transactions: txs,
+            notifications: nextNotifications,
+            lifecycleByHash: {
+              ...state.lifecycleByHash,
+              [txHash]: 'confirmed',
+            },
+            balance: balanceAfterConfirm ?? state.balance,
+            stats: computeStats(txs),
+          };
+        });
 
-  addOptimisticOutgoing: (tx, balanceAfterSend) => {
-    upsertTransactionHistory(tx);
-    set((state) => {
-      const next = [tx, ...state.transactions.filter((item) => item.hash !== tx.hash)];
-      return {
-        transactions: next,
-        lifecycleByHash: {
-          ...state.lifecycleByHash,
-          [tx.hash]: 'pending',
-        },
-        balance: balanceAfterSend ?? state.balance,
-        stats: computeStats(next),
-      };
-    });
-  },
-
-  mapPendingHash: (pendingHash, realHash) => {
-    set((state) => {
-      const txs = state.transactions.map((tx) => {
-        if (tx.hash !== pendingHash) {
-          return tx;
+        if (realTx) {
+          upsertTransactionHistory(realTx);
         }
-        return {
-          ...tx,
-          hash: realHash,
-          status: 'pending',
-        } satisfies Transaction;
-      });
+      },
 
-      const lifecycleByHash = { ...state.lifecycleByHash };
-      if (lifecycleByHash[pendingHash]) {
-        lifecycleByHash[realHash] = lifecycleByHash[pendingHash];
-        delete lifecycleByHash[pendingHash];
-      }
+      failTransaction: (txHash) => {
+        set((state) => {
+          const txs = state.transactions.map((tx) => {
+            if (tx.hash !== txHash) {
+              return tx;
+            }
+            return {
+              ...tx,
+              status: 'failed',
+            } satisfies Transaction;
+          });
+          const failed = txs.find((tx) => tx.hash === txHash);
+          let nextNotifications = state.notifications;
+          if (failed) {
+            nextNotifications = appendNotification(nextNotifications, {
+              dedupeKey: `outgoing-failed:${txHash}`,
+              type: 'outgoing_failed',
+              title: 'Transfer failed',
+              description: `Could not send ${failed.amount} ${failed.token}.`,
+              txHash,
+              metadata: {
+                amount: failed.amount,
+                address: failed.to,
+                lifecycle: 'failed',
+              },
+            });
+            nextNotifications = appendNotification(nextNotifications, {
+              dedupeKey: `tx-failed:${txHash}`,
+              type: 'tx_failed',
+              title: 'Transaction rejected',
+              description: 'The network rejected or reverted your transaction.',
+              txHash,
+              metadata: {
+                lifecycle: 'failed',
+              },
+            });
+          }
+          return {
+            transactions: txs,
+            notifications: nextNotifications,
+            lifecycleByHash: {
+              ...state.lifecycleByHash,
+              [txHash]: 'failed',
+            },
+            stats: computeStats(txs),
+          };
+        });
+      },
 
-      return {
-        transactions: txs,
-        lifecycleByHash,
-      };
-    });
-  },
+      markNotificationRead: (id) => {
+        set((state) => ({
+          notifications: state.notifications.map((item) =>
+            item.id === id
+              ? {
+                  ...item,
+                  read: true,
+                }
+              : item
+          ),
+        }));
+      },
 
-  confirmTransaction: (txHash, realTx, balanceAfterConfirm) => {
-    set((state) => {
-      const txs = state.transactions.map((tx) => {
-        if (tx.hash !== txHash) {
-          return tx;
-        }
-        return {
-          ...(realTx ?? tx),
-          status: 'confirmed',
-        } satisfies Transaction;
-      });
-      return {
-        transactions: txs,
-        lifecycleByHash: {
-          ...state.lifecycleByHash,
-          [txHash]: 'confirmed',
-        },
-        balance: balanceAfterConfirm ?? state.balance,
-        stats: computeStats(txs),
-      };
-    });
+      markAllNotificationsRead: () => {
+        set((state) => ({
+          notifications: state.notifications.map((item) => ({ ...item, read: true })),
+        }));
+      },
 
-    if (realTx) {
-      upsertTransactionHistory(realTx);
+      removeNotification: (id) => {
+        set((state) => ({
+          notifications: state.notifications.filter((item) => item.id !== id),
+        }));
+      },
+    }),
+    {
+      name: 'hush-realtime-store',
+      partialize: (state) => ({
+        notifications: state.notifications,
+      }),
     }
-  },
-
-  failTransaction: (txHash) => {
-    set((state) => {
-      const txs = state.transactions.map((tx) => {
-        if (tx.hash !== txHash) {
-          return tx;
-        }
-        return {
-          ...tx,
-          status: 'failed',
-        } satisfies Transaction;
-      });
-      return {
-        transactions: txs,
-        lifecycleByHash: {
-          ...state.lifecycleByHash,
-          [txHash]: 'failed',
-        },
-        stats: computeStats(txs),
-      };
-    });
-  },
-}));
+  )
+);
