@@ -7,6 +7,7 @@ import { useAccount, useConnect } from '@starknet-react/core';
 import { formatAddress } from '@/lib/blockchain';
 import { useWalletStore } from '@/store/walletStore';
 import { ensureEncryptionIdentity } from '@/lib/privacy';
+import { NotificationBell } from '@/components/notification-bell';
 
 export function WalletHeader() {
   const { address, isConnected } = useAccount();
@@ -89,14 +90,17 @@ export function WalletHeader() {
           )}
         </div>
 
-        <Button
-          onClick={handleConnect}
-          disabled={!preferredConnector || isPending}
-          className="gap-2"
-        >
-          <Wallet className="h-4 w-4" />
-          {pendingConnector || isPending ? 'Connecting...' : 'Connect Wallet'}
-        </Button>
+        <div className="flex items-center gap-2">
+          <NotificationBell />
+          <Button
+            onClick={handleConnect}
+            disabled={!preferredConnector || isPending}
+            className="gap-2"
+          >
+            <Wallet className="h-4 w-4" />
+            {pendingConnector || isPending ? 'Connecting...' : 'Connect Wallet'}
+          </Button>
+        </div>
       </div>
     );
   }
@@ -106,6 +110,8 @@ export function WalletHeader() {
       <span className="text-xl font-semibold">Hush</span>
 
       <div className="flex items-center gap-3">
+        <NotificationBell />
+
         <span className="font-mono text-sm">
           {address ? formatAddress(address) : ''}
         </span>

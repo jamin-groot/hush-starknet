@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AppLayout } from '@/components/app-layout';
 import { TransactionCard } from '@/components/transaction-card';
 import { Button } from '@/components/ui/button';
@@ -38,7 +38,14 @@ export default function TransactionsPage() {
   const [filter, setFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
+  const [highlightedHash, setHighlightedHash] = useState<string | null>(null);
   const inboxNotes: InboxNote[] = messages;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    setHighlightedHash(params.get('highlight')?.toLowerCase() ?? null);
+  }, []);
 
   const filteredTransactions = transactions.filter((tx) => {
     const matchesFilter =
@@ -125,6 +132,7 @@ export default function TransactionsPage() {
               <TransactionCard
                 key={tx.id}
                 transaction={tx}
+                className={highlightedHash === tx.hash.toLowerCase() ? 'border-primary bg-primary/5 shadow-[0_0_0_1px_hsl(var(--primary))]' : undefined}
                 onClick={() => setSelectedTx(tx)}
               />
             ))

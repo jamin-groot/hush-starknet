@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { cn } from '@/lib/utils';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { ArrowUpRight, ArrowDownLeft, Lock } from 'lucide-react';
@@ -8,9 +9,10 @@ import type { Transaction } from '@/lib/blockchain';
 interface TransactionCardProps {
   transaction: Transaction;
   onClick?: () => void;
+  className?: string;
 }
 
-export function TransactionCard({ transaction, onClick }: TransactionCardProps) {
+export function TransactionCard({ transaction, onClick, className }: TransactionCardProps) {
   const isSend = transaction.type === 'send';
   const date = new Date(transaction.timestamp);
   const [isMounted, setIsMounted] = useState(false);
@@ -35,7 +37,7 @@ export function TransactionCard({ transaction, onClick }: TransactionCardProps) 
 
   return (
     <Card
-      className="border border-[#1A1E22] cursor-pointer p-4 transition-colors hover:bg-muted/50"
+      className={cn('border border-[#1A1E22] cursor-pointer p-4 transition-colors hover:bg-muted/50', className)}
       onClick={onClick}
     >
       <div className="flex items-center justify-between">
