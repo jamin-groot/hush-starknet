@@ -18,6 +18,10 @@ const ELIGIBLE_TYPES = new Set([
   'private_message',
   'tx_confirmed',
   'tx_failed',
+  'payment_request_arrived',
+  'payment_request_paid',
+  'payment_request_rejected',
+  'payment_request_expired',
 ]);
 
 const normalizeToastEventKey = (notification: RealtimeNotification): string => {
@@ -38,9 +42,11 @@ const normalizeToastEventKey = (notification: RealtimeNotification): string => {
   return `note:${hash}`;
 };
 
-const lifecycleVariant = (lifecycle?: 'pending' | 'confirmed' | 'failed'): 'secondary' | 'default' | 'destructive' => {
-  if (lifecycle === 'confirmed') return 'default';
-  if (lifecycle === 'failed') return 'destructive';
+const lifecycleVariant = (
+  lifecycle?: 'pending' | 'confirmed' | 'failed' | 'paid' | 'expired' | 'rejected'
+): 'secondary' | 'default' | 'destructive' => {
+  if (lifecycle === 'confirmed' || lifecycle === 'paid') return 'default';
+  if (lifecycle === 'failed' || lifecycle === 'expired' || lifecycle === 'rejected') return 'destructive';
   return 'secondary';
 };
 

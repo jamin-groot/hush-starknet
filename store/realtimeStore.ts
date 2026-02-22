@@ -3,7 +3,11 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Transaction } from '@/lib/blockchain';
-import { getEncryptedNotesForRecipient, decryptTransactionNote } from '@/lib/privacy';
+import {
+  getEncryptedMessagesForWallet,
+  decryptTransactionNote,
+  type StoredEncryptedNote,
+} from '@/lib/privacy';
 import {
   getTransactionHistoryForWallet,
   upsertTransactionHistory,
@@ -11,6 +15,8 @@ import {
 import { CallData, RpcProvider } from 'starknet';
 
 type LifecycleState = 'pending' | 'confirmed' | 'failed';
+type RequestStatus = 'pending' | 'paid' | 'expired' | 'rejected';
+type NotificationLifecycle = LifecycleState | RequestStatus;
 type NotificationType =
   | 'incoming_transfer'
   | 'outgoing_pending'
@@ -19,13 +25,36 @@ type NotificationType =
   | 'encrypted_note'
   | 'private_message'
   | 'tx_confirmed'
-  | 'tx_failed';
+  | 'tx_failed'
+  | 'payment_request_arrived'
+  | 'payment_request_paid'
+  | 'payment_request_rejected'
+  | 'payment_request_expired';
 
 interface RealtimeMessage {
-  txHash: string;
+  id: string;
+  txHash?: string;
+  kind: 'payment_note' | 'chat' | 'request';
+  requestId?: string;
+  amount?: string;
+  requestStatus?: RequestStatus;
+  expiresAt?: number;
+  paidTxHash?: string;
   from: string;
+  to: string;
+  counterparty: string;
+  direction: 'sent' | 'received';
+  isPaymentLinked: boolean;
   createdAt: number;
   plaintext: string;
+}
+
+interface ConversationThread {
+  counterparty: string;
+  messages: RealtimeMessage[];
+  lastMessageAt: number;
+  lastMessagePreview: string;
+  unreadCount: number;
 }
 
 interface RealtimeNotification {
@@ -41,7 +70,7 @@ interface RealtimeNotification {
     messagePreview?: string;
     amount?: string;
     address?: string;
-    lifecycle?: LifecycleState;
+    lifecycle?: NotificationLifecycle;
   };
 }
 
@@ -56,6 +85,7 @@ interface RealtimeState {
   walletAddress: string | null;
   transactions: Transaction[];
   messages: RealtimeMessage[];
+  conversations: ConversationThread[];
   notifications: RealtimeNotification[];
   lifecycleByHash: Record<string, LifecycleState>;
   balance: string;
@@ -193,7 +223,11 @@ const mergeHistoryWithMessages = (
   history: Transaction[],
   messages: RealtimeMessage[]
 ): Transaction[] => {
-  const byHash = new Map(messages.map((item) => [item.txHash, item]));
+  const byHash = new Map(
+    messages
+      .filter((item) => item.txHash)
+      .map((item) => [item.txHash as string, item])
+  );
   const merged = history.map((tx) => {
     const linked = byHash.get(tx.hash);
     if (!linked) {
@@ -208,11 +242,14 @@ const mergeHistoryWithMessages = (
   });
 
   for (const note of messages) {
+    if (!note.txHash || note.direction !== 'received') {
+      continue;
+    }
     if (merged.some((tx) => tx.hash === note.txHash)) {
       continue;
     }
     merged.push({
-      id: `inbox-${note.txHash}`,
+      id: `inbox-${note.id}`,
       from: note.from,
       to: address,
       amount: '0',
@@ -232,15 +269,44 @@ const mergeHistoryWithMessages = (
 };
 
 const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
-  const encryptedNotes = await getEncryptedNotesForRecipient(address);
+  const encryptedNotes = await getEncryptedMessagesForWallet(address);
 
   const decrypted = await Promise.all(
     encryptedNotes.map(async (entry) => {
       try {
+        const payload = entry.payload as StoredEncryptedNote['payload'];
+        if (!payload?.senderAddress || !payload?.recipientAddress) {
+          return null;
+        }
         const plaintext = await decryptTransactionNote(entry.payload, address);
+        const senderAddress = payload.senderAddress;
+        const recipientAddress = payload.recipientAddress;
+        const direction = normalize(senderAddress) === normalize(address) ? 'sent' : 'received';
+        const counterparty = direction === 'sent' ? recipientAddress : senderAddress;
+        const requestStatus = entry.status;
+        const derivedRequestStatus: RequestStatus | undefined =
+          entry.kind === 'request'
+            ? requestStatus === 'paid' || requestStatus === 'rejected'
+              ? requestStatus
+              : typeof entry.expiresAt === 'number' && entry.expiresAt < Date.now()
+                ? 'expired'
+                : 'pending'
+            : undefined;
+
         return {
+          id: entry.id ?? entry.txHash ?? `msg-${entry.createdAt}`,
           txHash: entry.txHash,
-          from: entry.payload.senderAddress,
+          kind: entry.kind ?? (entry.txHash ? 'payment_note' : 'chat'),
+          requestId: entry.requestId,
+          amount: entry.amount,
+          requestStatus: derivedRequestStatus,
+          expiresAt: entry.expiresAt,
+          paidTxHash: entry.paidTxHash,
+          from: senderAddress,
+          to: recipientAddress,
+          counterparty,
+          direction,
+          isPaymentLinked: Boolean(entry.txHash),
           createdAt: entry.createdAt,
           plaintext,
         } satisfies RealtimeMessage;
@@ -251,6 +317,31 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
   );
 
   return decrypted.filter((note): note is RealtimeMessage => note !== null);
+};
+
+const buildConversations = (messages: RealtimeMessage[]): ConversationThread[] => {
+  const grouped = new Map<string, RealtimeMessage[]>();
+
+  for (const message of messages) {
+    const key = normalize(message.counterparty);
+    const bucket = grouped.get(key) ?? [];
+    bucket.push(message);
+    grouped.set(key, bucket);
+  }
+
+  return Array.from(grouped.entries())
+    .map(([counterparty, list]) => {
+      const ordered = [...list].sort((a, b) => a.createdAt - b.createdAt);
+      const last = ordered[ordered.length - 1];
+      return {
+        counterparty,
+        messages: ordered,
+        lastMessageAt: last?.createdAt ?? 0,
+        lastMessagePreview: (last?.plaintext ?? '').slice(0, 120),
+        unreadCount: ordered.filter((message) => message.direction === 'received').length,
+      } satisfies ConversationThread;
+    })
+    .sort((a, b) => b.lastMessageAt - a.lastMessageAt);
 };
 
 const performRefresh = async (address: string, account?: unknown) => {
@@ -300,6 +391,7 @@ const performRefresh = async (address: string, account?: unknown) => {
     return {
       transactions: mergedTransactions,
       messages,
+      conversations: buildConversations(messages),
       balance,
       stats: computeStats(mergedTransactions),
     };
@@ -314,6 +406,7 @@ export const useRealtimeStore = create<RealtimeState>()(
       walletAddress: null,
       transactions: [],
       messages: [],
+      conversations: [],
       notifications: [],
       lifecycleByHash: {},
       balance: '0.0000',
@@ -327,6 +420,7 @@ export const useRealtimeStore = create<RealtimeState>()(
             walletAddress: normalized,
             transactions: [],
             messages: [],
+            conversations: [],
             lifecycleByHash: {},
             balance: '0.0000',
             stats: emptyStats(),
@@ -340,7 +434,7 @@ export const useRealtimeStore = create<RealtimeState>()(
             set((state) => {
               let nextNotifications = state.notifications;
               const oldTxByHash = new Map(state.transactions.map((tx) => [tx.hash, tx]));
-              const oldMessagesByHash = new Map(state.messages.map((msg) => [msg.txHash, msg]));
+              const oldMessagesById = new Map(state.messages.map((msg) => [msg.id, msg]));
 
               for (const tx of data.transactions) {
                 if (tx.type === 'receive' && tx.status === 'confirmed' && !oldTxByHash.has(tx.hash)) {
@@ -374,25 +468,89 @@ export const useRealtimeStore = create<RealtimeState>()(
               }
 
               for (const message of data.messages) {
-                if (!oldMessagesByHash.has(message.txHash)) {
-                  nextNotifications = appendNotification(nextNotifications, {
-                    dedupeKey: `private-message:${message.txHash}`,
-                    type: 'private_message',
-                    title: 'New private message',
-                    description: message.plaintext.slice(0, 90),
-                    txHash: message.txHash,
-                    metadata: {
-                      messagePreview: message.plaintext.slice(0, 120),
-                      address: message.from,
-                    },
-                    timestamp: message.createdAt,
-                  });
+                const previous = oldMessagesById.get(message.id);
+
+                if (!previous && message.direction === 'received') {
+                  if (message.kind === 'request') {
+                    nextNotifications = appendNotification(nextNotifications, {
+                      dedupeKey: `request-arrived:${message.requestId ?? message.id}`,
+                      type: 'payment_request_arrived',
+                      title: 'Payment request received',
+                      description: `Request for ${message.amount ?? '0'} STRK`,
+                      txHash: message.txHash,
+                      metadata: {
+                        amount: message.amount,
+                        address: message.from,
+                        lifecycle: message.requestStatus ?? 'pending',
+                      },
+                      timestamp: message.createdAt,
+                    });
+                  } else {
+                    nextNotifications = appendNotification(nextNotifications, {
+                      dedupeKey: `private-message:${message.id}`,
+                      type: 'private_message',
+                      title: 'New private message',
+                      description: message.plaintext.slice(0, 90),
+                      txHash: message.txHash,
+                      metadata: {
+                        messagePreview: message.plaintext.slice(0, 120),
+                        address: message.from,
+                      },
+                      timestamp: message.createdAt,
+                    });
+                  }
+                }
+
+                if (
+                  message.kind === 'request' &&
+                  previous?.requestStatus &&
+                  previous.requestStatus !== message.requestStatus
+                ) {
+                  if (message.requestStatus === 'paid') {
+                    nextNotifications = appendNotification(nextNotifications, {
+                      dedupeKey: `request-paid:${message.requestId ?? message.id}`,
+                      type: 'payment_request_paid',
+                      title: 'Payment request paid',
+                      description: `${message.amount ?? '0'} STRK request marked as paid.`,
+                      txHash: message.paidTxHash ?? message.txHash,
+                      metadata: {
+                        amount: message.amount,
+                        address: message.counterparty,
+                        lifecycle: 'paid',
+                      },
+                    });
+                  } else if (message.requestStatus === 'rejected') {
+                    nextNotifications = appendNotification(nextNotifications, {
+                      dedupeKey: `request-rejected:${message.requestId ?? message.id}`,
+                      type: 'payment_request_rejected',
+                      title: 'Payment request rejected',
+                      description: `Request for ${message.amount ?? '0'} STRK was rejected.`,
+                      metadata: {
+                        amount: message.amount,
+                        address: message.counterparty,
+                        lifecycle: 'rejected',
+                      },
+                    });
+                  } else if (message.requestStatus === 'expired') {
+                    nextNotifications = appendNotification(nextNotifications, {
+                      dedupeKey: `request-expired:${message.requestId ?? message.id}`,
+                      type: 'payment_request_expired',
+                      title: 'Payment request expired',
+                      description: `Request for ${message.amount ?? '0'} STRK expired after 24h.`,
+                      metadata: {
+                        amount: message.amount,
+                        address: message.counterparty,
+                        lifecycle: 'expired',
+                      },
+                    });
+                  }
                 }
               }
 
               return {
                 transactions: data.transactions,
                 messages: data.messages,
+                conversations: data.conversations,
                 notifications: nextNotifications,
                 balance: data.balance,
                 stats: data.stats,
@@ -432,6 +590,7 @@ export const useRealtimeStore = create<RealtimeState>()(
           set({
             transactions: data.transactions,
             messages: data.messages,
+            conversations: data.conversations,
             balance: data.balance,
             stats: data.stats,
             isSyncing: false,

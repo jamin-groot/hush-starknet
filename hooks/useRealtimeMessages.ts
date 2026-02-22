@@ -9,6 +9,7 @@ export function useRealtimeMessages() {
   const initialize = useRealtimeStore((state) => state.initialize);
   const stop = useRealtimeStore((state) => state.stop);
   const messages = useRealtimeStore((state) => state.messages);
+  const conversations = useRealtimeStore((state) => state.conversations);
   const isSyncing = useRealtimeStore((state) => state.isSyncing);
 
   useEffect(() => {
@@ -24,6 +25,13 @@ export function useRealtimeMessages() {
 
   return {
     messages,
+    conversations,
     loading: isSyncing,
+    getConversationMessages: (counterpartyAddress: string) => {
+      const normalized = counterpartyAddress.trim().toLowerCase();
+      return messages
+        .filter((message) => message.counterparty.toLowerCase() === normalized)
+        .sort((a, b) => a.createdAt - b.createdAt);
+    },
   };
 }

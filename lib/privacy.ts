@@ -9,7 +9,14 @@ export interface EncryptedNotePayload {
 }
 
 export interface StoredEncryptedNote {
-  txHash: string;
+  id?: string;
+  txHash?: string;
+  kind?: 'payment_note' | 'chat' | 'request';
+  requestId?: string;
+  paidTxHash?: string;
+  amount?: string;
+  status?: 'pending' | 'paid' | 'expired' | 'rejected';
+  expiresAt?: number;
   payload: EncryptedNotePayload;
   createdAt: number;
 }
@@ -211,7 +218,10 @@ export async function storeEncryptedNoteMetadata(record: StoredEncryptedNote): P
   const response = await fetch('/api/privacy/messages', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(record),
+    body: JSON.stringify({
+      ...record,
+      kind: record.kind ?? (record.txHash ? 'payment_note' : 'chat'),
+    }),
   });
 
   if (!response.ok) {
@@ -226,6 +236,79 @@ export async function getEncryptedNotesForRecipient(recipientAddress: string): P
   }
   const data = (await response.json()) as { messages?: StoredEncryptedNote[] };
   return data.messages ?? [];
+}
+
+export async function getEncryptedMessagesForWallet(
+  walletAddress: string
+): Promise<StoredEncryptedNote[]> {
+  const response = await fetch(
+    `/api/privacy/messages?recipient=${encodeURIComponent(normalizeAddress(walletAddress))}&includeSent=true`
+  );
+
+  if (!response.ok) {
+    throw new Error('Failed to load encrypted messages');
+  }
+
+  const data = (await response.json()) as { messages?: StoredEncryptedNote[] };
+  return data.messages ?? [];
+}
+
+export async function storeEncryptedChatMessage(record: {
+  payload: EncryptedNotePayload;
+  createdAt?: number;
+  txHash?: string;
+}): Promise<void> {
+  await storeEncryptedNoteMetadata({
+    id: `msg-${Date.now()}`,
+    kind: record.txHash ? 'payment_note' : 'chat',
+    txHash: record.txHash,
+    payload: record.payload,
+    createdAt: record.createdAt ?? Date.now(),
+  });
+}
+
+export async function storePaymentRequestMessage(record: {
+  payload: EncryptedNotePayload;
+  amount: string;
+  createdAt?: number;
+  expiresAt?: number;
+  requestId?: string;
+}): Promise<{ requestId: string }> {
+  const requestId = record.requestId ?? `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const createdAt = record.createdAt ?? Date.now();
+  const expiresAt = record.expiresAt ?? createdAt + 24 * 60 * 60 * 1000;
+
+  await storeEncryptedNoteMetadata({
+    id: `msg-${Date.now()}`,
+    requestId,
+    kind: 'request',
+    amount: record.amount,
+    status: 'pending',
+    expiresAt,
+    payload: record.payload,
+    createdAt,
+  });
+
+  return { requestId };
+}
+
+export async function updatePaymentRequestMessage(record: {
+  id?: string;
+  requestId?: string;
+  status: 'pending' | 'paid' | 'expired' | 'rejected';
+  txHash?: string;
+  paidTxHash?: string;
+  expiresAt?: number;
+}): Promise<void> {
+  const response = await fetch('/api/privacy/messages', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(record),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to update payment request');
+  }
 }
 
 export async function resolveRecipientPublicKey(recipientAddress: string): Promise<JsonWebKey> {
