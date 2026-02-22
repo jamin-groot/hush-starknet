@@ -1,12 +1,20 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useAccount } from '@starknet-react/core';
-import { cairo, Contract, validateAndParseAddress } from 'starknet';
+import { cairo, Contract, RpcProvider, validateAndParseAddress } from 'starknet';
 
 const STRK_ADDRESS =
   '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
 const STRK_DECIMALS = 18;
+const RPC_ENDPOINTS = [
+  'https://starknet-sepolia-rpc.publicnode.com',
+  'https://rpc.starknet-testnet.lava.build:443',
+] as const;
+const POLL_INTERVAL_MS = 3000;
+const MAX_POLL_ATTEMPTS = 20;
+
+type TransferLifecycle = 'idle' | 'pending' | 'success' | 'failure';
 
 const ERC20_ABI = [
   {
@@ -27,6 +35,8 @@ const ERC20_ABI = [
     stateMutability: 'view',
   },
 ] as const;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const toWei = (value: string, decimals = STRK_DECIMALS): bigint => {
   const normalized = value.trim();
@@ -49,11 +59,87 @@ const uint256ToBigInt = (value: { low: bigint | string | number; high: bigint | 
   return (high << BigInt(128)) + low;
 };
 
+const isSuccessStatus = (status: unknown): boolean => {
+  if (!status || typeof status !== 'object') {
+    return false;
+  }
+
+  const state = status as Record<string, unknown>;
+  const finality = String(state.finality_status ?? '').toUpperCase();
+  const execution = String(state.execution_status ?? '').toUpperCase();
+  const txStatus = String(state.tx_status ?? '').toUpperCase();
+
+  return (
+    finality.includes('ACCEPTED_ON_L2') ||
+    finality.includes('ACCEPTED_ON_L1') ||
+    execution.includes('SUCCEEDED') ||
+    txStatus.includes('ACCEPTED')
+  );
+};
+
+const isFailureStatus = (status: unknown): boolean => {
+  if (!status || typeof status !== 'object') {
+    return false;
+  }
+
+  const state = status as Record<string, unknown>;
+  const finality = String(state.finality_status ?? '').toUpperCase();
+  const execution = String(state.execution_status ?? '').toUpperCase();
+  const txStatus = String(state.tx_status ?? '').toUpperCase();
+
+  return (
+    finality.includes('REJECTED') ||
+    execution.includes('REVERTED') ||
+    execution.includes('REJECTED') ||
+    txStatus.includes('REJECTED') ||
+    txStatus.includes('REVERTED')
+  );
+};
+
+const resolveTransaction = async (transactionHash: string): Promise<void> => {
+  for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt += 1) {
+    for (const nodeUrl of RPC_ENDPOINTS) {
+      try {
+        const provider = new RpcProvider({ nodeUrl });
+        const status = await provider.getTransactionStatus(transactionHash);
+
+        if (isSuccessStatus(status)) {
+          return;
+        }
+
+        if (isFailureStatus(status)) {
+          throw new Error(`Transaction failed with status: ${JSON.stringify(status)}`);
+        }
+      } catch (error) {
+        if (error instanceof Error && /rejected|reverted|failed/i.test(error.message)) {
+          throw error;
+        }
+      }
+    }
+
+    await sleep(POLL_INTERVAL_MS * (attempt < 4 ? 1 : 2));
+  }
+
+  throw new Error('Transaction confirmation timed out');
+};
+
 export function useSendStrk() {
   const { account, isConnected, address } = useAccount();
-  const [isSending, setIsSending] = useState(false);
+  const [lifecycle, setLifecycle] = useState<TransferLifecycle>('idle');
+  const [transactionHash, setTransactionHash] = useState<string | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
 
-  const sendStrk = async (recipient: string, amount: string): Promise<string> => {
+  const resetLifecycle = useCallback(() => {
+    setLifecycle('idle');
+    setTransactionHash(null);
+    setLastError(null);
+  }, []);
+
+  const sendStrk = useCallback(async (recipient: string, amount: string): Promise<string> => {
+    if (lifecycle === 'pending') {
+      throw new Error('Transaction already pending. Please wait for confirmation.');
+    }
+
     if (!isConnected || !account || !address) {
       throw new Error('Wallet not connected');
     }
@@ -70,7 +156,8 @@ export function useSendStrk() {
       throw new Error('Invalid amount');
     }
 
-    setIsSending(true);
+    setLifecycle('pending');
+    setLastError(null);
 
     try {
       const contract = new Contract({ abi: ERC20_ABI, address: STRK_ADDRESS, providerOrAccount: account });
@@ -84,14 +171,28 @@ export function useSendStrk() {
       }
 
       const tx = await contract.transfer(parsedRecipient, cairo.uint256(amountWei));
-      return tx.transaction_hash;
-    } finally {
-      setIsSending(false);
+      const hash = tx.transaction_hash;
+      setTransactionHash(hash);
+
+      await resolveTransaction(hash);
+
+      setLifecycle('success');
+      return hash;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to send transaction';
+      setLastError(message);
+      setLifecycle('failure');
+      console.error('[hush] STRK lifecycle failure:', error);
+      throw new Error(message);
     }
-  };
+  }, [account, address, isConnected, lifecycle]);
 
   return {
     sendStrk,
-    isSending,
+    isSending: lifecycle === 'pending',
+    lifecycle,
+    transactionHash,
+    lastError,
+    resetLifecycle,
   };
 }

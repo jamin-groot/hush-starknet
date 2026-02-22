@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useAccount } from '@starknet-react/core';
 import { CallData, RpcProvider } from 'starknet';
 
@@ -75,74 +75,71 @@ export function useTokenBalance() {
   const [balance, setBalance] = useState('0.0000');
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
+  const fetchBalance = useCallback(async () => {
     if (!isConnected || !address) {
       setBalance('0.0000');
       return;
     }
 
+    setLoading(true);
+
+    try {
+      const callers: ContractCaller[] = [
+        ...RPC_ENDPOINTS.map((nodeUrl) => new RpcProvider({ nodeUrl })),
+      ];
+
+      if (account && typeof account.callContract === 'function') {
+        const chainId = await account.getChainId();
+        if (chainId !== STARKNET_SEPOLIA_CHAIN_ID) {
+          setBalance('0.0000');
+          return;
+        }
+
+        callers.push(account as unknown as ContractCaller);
+      }
+
+      let rawBalance: bigint | null = null;
+
+      for (const caller of callers) {
+        try {
+          rawBalance = await fetchBalanceWithCaller(caller, address);
+          break;
+        } catch {
+          // Try next RPC/account caller.
+        }
+      }
+
+      if (rawBalance === null) {
+        throw new Error('All balance providers failed');
+      }
+
+      setBalance(formatTokenBalance(rawBalance, STRK_DECIMALS));
+    } catch (error) {
+      console.error('STRK balance error:', error);
+      setBalance('0.0000');
+    } finally {
+      setLoading(false);
+    }
+  }, [isConnected, address, account]);
+
+  useEffect(() => {
     let isCancelled = false;
 
-    const fetchBalance = async () => {
-      if (!isCancelled) {
-        setLoading(true);
+    const safeFetch = async () => {
+      if (isCancelled) {
+        return;
       }
-
-      try {
-        const callers: ContractCaller[] = [
-          ...RPC_ENDPOINTS.map((nodeUrl) => new RpcProvider({ nodeUrl })),
-        ];
-
-        if (account && typeof account.callContract === 'function') {
-          const chainId = await account.getChainId();
-          if (chainId !== STARKNET_SEPOLIA_CHAIN_ID) {
-            if (!isCancelled) {
-              setBalance('0.0000');
-            }
-            return;
-          }
-
-          callers.push(account as unknown as ContractCaller);
-        }
-
-        let rawBalance: bigint | null = null;
-
-        for (const caller of callers) {
-          try {
-            rawBalance = await fetchBalanceWithCaller(caller, address);
-            break;
-          } catch {
-            // Try next RPC/account caller.
-          }
-        }
-
-        if (rawBalance === null) {
-          throw new Error('All balance providers failed');
-        }
-
-        if (!isCancelled) {
-          setBalance(formatTokenBalance(rawBalance, STRK_DECIMALS));
-        }
-      } catch (error) {
-        console.error('STRK balance error:', error);
-        if (!isCancelled) {
-          setBalance('0.0000');
-        }
-      } finally {
-        if (!isCancelled) {
-          setLoading(false);
-        }
-      }
+      await fetchBalance();
     };
 
-    fetchBalance();
-    const interval = setInterval(fetchBalance, 15000);
+    safeFetch();
+    const interval = setInterval(safeFetch, 15000);
 
     return () => {
       isCancelled = true;
       clearInterval(interval);
     };
-  }, [isConnected, address, account]);
+  }, [fetchBalance]);
 
-  return { balance, loading };
+  return { balance, loading, refetchBalance: fetchBalance };
 }
