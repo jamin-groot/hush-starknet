@@ -1,7 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useAccount } from '@starknet-react/core';
+import { useState } from 'react';
 import { AppLayout } from '@/components/app-layout';
 import { TransactionCard } from '@/components/transaction-card';
 import { Button } from '@/components/ui/button';
@@ -23,10 +22,9 @@ import {
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Search, Filter, Copy, ExternalLink, Lock } from 'lucide-react';
-import { getTransactions, formatAddress } from '@/lib/blockchain';
-import type { Transaction } from '@/lib/blockchain';
-import { decryptTransactionNote, getEncryptedNotesForRecipient } from '@/lib/privacy';
-
+import { formatAddress, type Transaction } from '@/lib/blockchain';
+import { useRealtimeTransactions } from '@/hooks/useRealtimeTransactions';
+import { useRealtimeMessages } from '@/hooks/useRealtimeMessages';
 interface InboxNote {
   txHash: string;
   from: string;
@@ -35,46 +33,12 @@ interface InboxNote {
 }
 
 export default function TransactionsPage() {
-  const { address } = useAccount();
-  const [transactions] = useState(getTransactions());
+  const { transactions } = useRealtimeTransactions();
+  const { messages } = useRealtimeMessages();
   const [filter, setFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
-  const [inboxNotes, setInboxNotes] = useState<InboxNote[]>([]);
-
-  useEffect(() => {
-    const loadInbox = async () => {
-      if (!address) {
-        setInboxNotes([]);
-        return;
-      }
-
-      try {
-        const encryptedNotes = await getEncryptedNotesForRecipient(address);
-        const decrypted = await Promise.all(
-          encryptedNotes.map(async (entry) => {
-            try {
-              const plaintext = await decryptTransactionNote(entry.payload, address);
-              return {
-                txHash: entry.txHash,
-                from: entry.payload.senderAddress,
-                createdAt: entry.createdAt,
-                plaintext,
-              } satisfies InboxNote;
-            } catch {
-              return null;
-            }
-          })
-        );
-
-        setInboxNotes(decrypted.filter((note): note is InboxNote => note !== null));
-      } catch {
-        setInboxNotes([]);
-      }
-    };
-
-    loadInbox();
-  }, [address]);
+  const inboxNotes: InboxNote[] = messages;
 
   const filteredTransactions = transactions.filter((tx) => {
     const matchesFilter =
@@ -88,7 +52,8 @@ export default function TransactionsPage() {
       tx.to.toLowerCase().includes(searchQuery.toLowerCase()) ||
       tx.from.toLowerCase().includes(searchQuery.toLowerCase()) ||
       tx.hash.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      tx.note?.toLowerCase().includes(searchQuery.toLowerCase());
+      tx.note?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      tx.decryptedNote?.toLowerCase().includes(searchQuery.toLowerCase());
 
     return matchesFilter && matchesSearch;
   });

@@ -20,7 +20,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Lock, Send, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 import { isValidAddress } from '@/lib/blockchain';
 import { useSendStrk } from '@/hooks/useSendStrk';
-import { useTokenBalance } from '@/hooks/useTokenBalance';
+import { useRealtimeBalance } from '@/hooks/useRealtimeBalance';
 import { TransactionSuccessModal } from '@/components/transaction-success-modal';
 import type { Transaction } from '@/lib/blockchain';
 import {
@@ -32,7 +32,7 @@ import {
 export default function SendPage() {
   const { sendStrk, isSending, transactionHash, lifecycle, resetLifecycle } = useSendStrk();
   const { address } = useAccount();
-  const { balance, refetchBalance } = useTokenBalance();
+  const { balance, refetchBalance } = useRealtimeBalance();
 
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
@@ -80,7 +80,12 @@ export default function SendPage() {
         throw new Error('Privacy mode requires a note to encrypt');
       }
 
-      const hash = await sendStrk(recipient, amount, balance);
+      const hash = await sendStrk(recipient, amount, balance, {
+        token,
+        note: isPrivate ? undefined : note,
+        encryptedNote: encryptedPayload,
+        isPrivate,
+      });
 
       if (isPrivate && encryptedPayload) {
         await storeEncryptedNoteMetadata({
@@ -90,7 +95,7 @@ export default function SendPage() {
         });
       }
 
-      setLastTransaction({
+      const txRecord: Transaction = {
         id: `tx-${Date.now()}`,
         from: address ?? '0x0',
         to: recipient,
@@ -103,7 +108,9 @@ export default function SendPage() {
         type: 'send',
         isPrivate,
         hash,
-      });
+      };
+
+      setLastTransaction(txRecord);
 
       setSuccessOpen(true);
       await refetchBalance();

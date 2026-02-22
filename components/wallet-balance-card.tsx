@@ -6,11 +6,11 @@ import { Button } from '@/components/ui/button';
 import { Eye, EyeOff, Copy, Check, Wallet } from 'lucide-react';
 import { useAccount } from '@starknet-react/core';
 import { formatAddress } from '@/lib/blockchain';
-import { useTokenBalance } from '@/hooks/useTokenBalance';
+import { useRealtimeBalance } from '@/hooks/useRealtimeBalance';
 
 export function WalletBalanceCard() {
-  const { address, isConnected } = useAccount();
-  const { balance } = useTokenBalance();
+  const { address } = useAccount();
+  const { balance } = useRealtimeBalance();
 
   const [showBalance, setShowBalance] = useState(true);
   const [copied, setCopied] = useState(false);

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { ArrowUpRight, ArrowDownLeft, Lock, Eye } from 'lucide-react';
+import { ArrowUpRight, ArrowDownLeft, Lock } from 'lucide-react';
 import { formatAddress, formatAmount } from '@/lib/blockchain';
 import type { Transaction } from '@/lib/blockchain';
 
@@ -10,16 +10,9 @@ interface TransactionCardProps {
   onClick?: () => void;
 }
 
-// Mock decrypted messages for demo
-const DECRYPTED_MESSAGES: Record<string, string> = {
-  'tx-2': 'Payment for freelance work - Thank you!',
-};
-
 export function TransactionCard({ transaction, onClick }: TransactionCardProps) {
   const isSend = transaction.type === 'send';
   const date = new Date(transaction.timestamp);
-  const [isRevealing, setIsRevealing] = useState(false);
-  const [isRevealed, setIsRevealed] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
   
   useEffect(() => {
@@ -39,19 +32,6 @@ export function TransactionCard({ transaction, onClick }: TransactionCardProps) 
     hour12: true,
     timeZone: 'UTC',
   }) : '--:--';
-
-  const handleRevealMessage = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!isRevealed && transaction.encryptedNote) {
-      setIsRevealing(true);
-      setTimeout(() => {
-        setIsRevealed(true);
-        setIsRevealing(false);
-      }, 800);
-    }
-  };
-
-  const decryptedMessage = DECRYPTED_MESSAGES[transaction.id] || 'Private message content';
 
   return (
     <Card
@@ -95,26 +75,10 @@ export function TransactionCard({ transaction, onClick }: TransactionCardProps) 
               <p className="text-sm text-muted-foreground">{transaction.note}</p>
             )}
             {transaction.encryptedNote && (
-              <div
-                onClick={handleRevealMessage}
-                className="relative cursor-pointer"
-              >
-                {!isRevealed ? (
-                  <div className="flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 transition-all hover:bg-primary/20">
-                    <Lock className="h-3 w-3 text-primary" />
-                    <span className="text-sm font-medium text-primary">
-                      {isRevealing ? 'Revealing...' : 'Tap to reveal message'}
-                    </span>
-                    <Eye className="h-3 w-3 text-primary" />
-                  </div>
-                ) : (
-                  <div className="animate-in fade-in zoom-in-95 duration-500 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2">
-                    <p className="text-sm text-foreground">{decryptedMessage}</p>
-                  </div>
-                )}
-                {isRevealing && (
-                  <div className="absolute inset-0 animate-pulse rounded-lg bg-gradient-to-r from-primary/20 via-primary/40 to-primary/20" />
-                )}
+              <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2">
+                <p className="text-sm text-foreground">
+                  {transaction.decryptedNote ?? 'Encrypted note attached'}
+                </p>
               </div>
             )}
           </div>

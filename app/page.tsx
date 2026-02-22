@@ -1,6 +1,5 @@
 'use client';
 
-import { useState } from 'react';
 import { AppLayout } from '@/components/app-layout';
 import { StatCard } from '@/components/stat-card';
 import { TransactionCard } from '@/components/transaction-card';
@@ -17,14 +16,15 @@ import {
   QrCode,
   Receipt,
 } from 'lucide-react';
-import { formatAddress, getTransactions, getTransactionStats } from '@/lib/blockchain';
+import { formatAddress } from '@/lib/blockchain';
 import { useAccount } from '@starknet-react/core';
+import { useRealtimeTransactions } from '@/hooks/useRealtimeTransactions';
 import Link from 'next/link';
 
 export default function DashboardPage() {
   const { address, isConnected } = useAccount();
-  const [transactions] = useState(getTransactions().slice(0, 5));
-  const stats = getTransactionStats();
+  const { transactions: realtimeTransactions, stats } = useRealtimeTransactions();
+  const transactions = realtimeTransactions.slice(0, 5);
 
   return (
     <AppLayout>
@@ -65,14 +65,14 @@ export default function DashboardPage() {
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
           <StatCard
             title="Total Sent"
-            value={`${stats.totalSent.toFixed(2)} ETH`}
+            value={`${stats.totalSent.toFixed(2)} STRK`}
             change="-12.5% this month"
             icon={TrendingDown}
             trend="down"
           />
           <StatCard
             title="Total Received"
-            value={`${stats.totalReceived.toFixed(2)} ETH`}
+            value={`${stats.totalReceived.toFixed(2)} STRK`}
             change="+8.2% this month"
             icon={TrendingUp}
             trend="up"

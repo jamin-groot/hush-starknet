@@ -3,6 +3,8 @@
 import { useCallback, useState } from 'react';
 import { useAccount } from '@starknet-react/core';
 import { cairo, Contract, RpcProvider, validateAndParseAddress } from 'starknet';
+import type { Transaction } from '@/lib/blockchain';
+import { useRealtimeStore } from '@/store/realtimeStore';
 
 const STRK_ADDRESS =
   '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
@@ -15,6 +17,12 @@ const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_ATTEMPTS = 20;
 
 type TransferLifecycle = 'idle' | 'pending' | 'success' | 'failure';
+interface SendMetadata {
+  token?: string;
+  note?: string;
+  encryptedNote?: string;
+  isPrivate?: boolean;
+}
 
 const ERC20_ABI = [
   {
@@ -121,6 +129,11 @@ const resolveTransaction = async (transactionHash: string): Promise<void> => {
 
 export function useSendStrk() {
   const { account, isConnected, address } = useAccount();
+  const addOptimisticOutgoing = useRealtimeStore((state) => state.addOptimisticOutgoing);
+  const mapPendingHash = useRealtimeStore((state) => state.mapPendingHash);
+  const confirmTransaction = useRealtimeStore((state) => state.confirmTransaction);
+  const failTransaction = useRealtimeStore((state) => state.failTransaction);
+  const refreshNow = useRealtimeStore((state) => state.refreshNow);
   const [lifecycle, setLifecycle] = useState<TransferLifecycle>('idle');
   const [transactionHash, setTransactionHash] = useState<string | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
@@ -131,7 +144,12 @@ export function useSendStrk() {
     setLastError(null);
   }, []);
 
-  const sendStrk = useCallback(async (recipient: string, amount: string, availableBalance: string): Promise<string> => {
+  const sendStrk = useCallback(async (
+    recipient: string,
+    amount: string,
+    availableBalance: string,
+    metadata?: SendMetadata
+  ): Promise<string> => {
     if (lifecycle === 'pending') {
       throw new Error('Transaction already pending. Please wait for confirmation.');
     }
@@ -167,6 +185,29 @@ export function useSendStrk() {
       throw new Error('Insufficient balance');
     }
 
+    const optimisticHash = `pending-${Date.now()}`;
+    let lifecycleHash = optimisticHash;
+    const optimisticTx: Transaction = {
+      id: `tx-${Date.now()}`,
+      from: address,
+      to: parsedRecipient,
+      amount,
+      token: metadata?.token ?? 'STRK',
+      note: metadata?.note,
+      encryptedNote: metadata?.encryptedNote,
+      timestamp: Date.now(),
+      status: 'pending',
+      type: 'send',
+      isPrivate: Boolean(metadata?.isPrivate),
+      hash: optimisticHash,
+    };
+
+    const nextBalance = (availableWei - amountWei).toString();
+    const padded = nextBalance.padStart(STRK_DECIMALS + 1, '0');
+    const nextBalanceFormatted = `${padded.slice(0, padded.length - STRK_DECIMALS)}.${padded.slice(padded.length - STRK_DECIMALS, padded.length - STRK_DECIMALS + 4)}`;
+
+    addOptimisticOutgoing(optimisticTx, nextBalanceFormatted);
+
     setLifecycle('pending');
     setLastError(null);
 
@@ -177,19 +218,28 @@ export function useSendStrk() {
       const tx = await contract.transfer(parsedRecipient, amountUint256);
       const hash = tx.transaction_hash;
       setTransactionHash(hash);
+      mapPendingHash(optimisticHash, hash);
+      lifecycleHash = hash;
 
       await resolveTransaction(hash);
 
       setLifecycle('success');
+      confirmTransaction(hash, {
+        ...optimisticTx,
+        hash,
+        status: 'confirmed',
+      });
+      await refreshNow(account);
       return hash;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send transaction';
       setLastError(message);
       setLifecycle('failure');
+      failTransaction(lifecycleHash);
       console.error('[hush] STRK lifecycle failure:', error);
       throw new Error(message);
     }
-  }, [account, address, isConnected, lifecycle]);
+  }, [account, address, isConnected, lifecycle, addOptimisticOutgoing, mapPendingHash, confirmTransaction, failTransaction, refreshNow]);
 
   return {
     sendStrk,
