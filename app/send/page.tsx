@@ -83,7 +83,7 @@ export default function SendPage() {
         throw new Error('Privacy mode requires a note to encrypt');
       }
 
-      const hash = await sendStrk(recipient, amount);
+      const hash = await sendStrk(recipient, amount, balance);
 
       if (isPrivate && encryptedPayload) {
         storeEncryptedNoteMetadata({

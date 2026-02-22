@@ -18,6 +18,15 @@ type TransferLifecycle = 'idle' | 'pending' | 'success' | 'failure';
 
 const ERC20_ABI = [
   {
+    name: 'Uint256',
+    type: 'struct',
+    size: 2,
+    members: [
+      { name: 'low', type: 'felt' },
+      { name: 'high', type: 'felt' },
+    ],
+  },
+  {
     name: 'transfer',
     type: 'function',
     inputs: [
@@ -26,13 +35,6 @@ const ERC20_ABI = [
     ],
     outputs: [{ name: 'success', type: 'felt' }],
     stateMutability: 'nonpayable',
-  },
-  {
-    name: 'balanceOf',
-    type: 'function',
-    inputs: [{ name: 'account', type: 'felt' }],
-    outputs: [{ name: 'balance', type: 'Uint256' }],
-    stateMutability: 'view',
   },
 ] as const;
 
@@ -51,12 +53,6 @@ const toWei = (value: string, decimals = STRK_DECIMALS): bigint => {
   const asInteger = `${normalizedWhole}${paddedFraction}`.replace(/^0+/, '') || '0';
 
   return BigInt(asInteger);
-};
-
-const uint256ToBigInt = (value: { low: bigint | string | number; high: bigint | string | number }) => {
-  const low = BigInt(value.low);
-  const high = BigInt(value.high);
-  return (high << BigInt(128)) + low;
 };
 
 const isSuccessStatus = (status: unknown): boolean => {
@@ -135,7 +131,7 @@ export function useSendStrk() {
     setLastError(null);
   }, []);
 
-  const sendStrk = useCallback(async (recipient: string, amount: string): Promise<string> => {
+  const sendStrk = useCallback(async (recipient: string, amount: string, availableBalance: string): Promise<string> => {
     if (lifecycle === 'pending') {
       throw new Error('Transaction already pending. Please wait for confirmation.');
     }
@@ -151,9 +147,24 @@ export function useSendStrk() {
       throw new Error('Invalid recipient address');
     }
 
+    if (!amount || typeof amount !== 'string' || amount.trim() === '') {
+      throw new Error('Invalid amount');
+    }
+    console.log('amount before conversion:', amount);
+    console.log('raw balance for send validation:', availableBalance);
+
     const amountWei = toWei(amount);
     if (amountWei <= BigInt(0)) {
       throw new Error('Invalid amount');
+    }
+
+    if (!availableBalance || typeof availableBalance !== 'string' || availableBalance.trim() === '') {
+      throw new Error('Invalid available balance');
+    }
+
+    const availableWei = toWei(availableBalance);
+    if (amountWei > availableWei) {
+      throw new Error('Insufficient balance');
     }
 
     setLifecycle('pending');
@@ -161,16 +172,9 @@ export function useSendStrk() {
 
     try {
       const contract = new Contract({ abi: ERC20_ABI, address: STRK_ADDRESS, providerOrAccount: account });
-      const balanceResponse = (await contract.balanceOf(address)) as {
-        balance: { low: string | number | bigint; high: string | number | bigint };
-      };
-      const balance = uint256ToBigInt(balanceResponse.balance);
-
-      if (amountWei > balance) {
-        throw new Error('Insufficient balance');
-      }
-
-      const tx = await contract.transfer(parsedRecipient, cairo.uint256(amountWei));
+      const amountUint256 = cairo.uint256(amountWei);
+      console.log('amount passed to transfer:', amountUint256);
+      const tx = await contract.transfer(parsedRecipient, amountUint256);
       const hash = tx.transaction_hash;
       setTransactionHash(hash);
 
