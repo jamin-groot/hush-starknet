@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useAccount } from '@starknet-react/core';
 import { AppLayout } from '@/components/app-layout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -21,10 +22,13 @@ import { isValidAddress } from '@/lib/blockchain';
 import { encryptMessage } from '@/lib/crypto';
 import { useSendStrk } from '@/hooks/useSendStrk';
 import { useTokenBalance } from '@/hooks/useTokenBalance';
+import { TransactionSuccessModal } from '@/components/transaction-success-modal';
+import type { Transaction } from '@/lib/blockchain';
 
 export default function SendPage() {
-  const { sendStrk, isSending } = useSendStrk();
-  const { balance } = useTokenBalance();
+  const { sendStrk, isSending, transactionHash, lifecycle, resetLifecycle } = useSendStrk();
+  const { address } = useAccount();
+  const { balance, refetchBalance } = useTokenBalance();
 
   const [recipient, setRecipient] = useState('');
   const [amount, setAmount] = useState('');
@@ -33,7 +37,8 @@ export default function SendPage() {
   const [isPrivate, setIsPrivate] = useState(false);
   const [isEncrypting, setIsEncrypting] = useState(false);
   const [error, setError] = useState('');
-  const [txHash, setTxHash] = useState<string | null>(null);
+  const [successOpen, setSuccessOpen] = useState(false);
+  const [lastTransaction, setLastTransaction] = useState<Transaction | null>(null);
 
   const isValidForm = isValidAddress(recipient) && parseFloat(amount) > 0;
 
@@ -61,7 +66,29 @@ export default function SendPage() {
       }
 
       const hash = await sendStrk(recipient, amount);
-      setTxHash(hash);
+
+      setLastTransaction({
+        id: `tx-${Date.now()}`,
+        from: address ?? '0x0',
+        to: recipient,
+        amount,
+        token,
+        note,
+        timestamp: Date.now(),
+        status: 'confirmed',
+        type: 'send',
+        isPrivate,
+        hash,
+      });
+
+      setSuccessOpen(true);
+      await refetchBalance();
+
+      setRecipient('');
+      setAmount('');
+      setToken('STRK');
+      setNote('');
+      setIsPrivate(false);
     } catch (err) {
       console.error('[hush] STRK transfer error:', err);
       setIsEncrypting(false);
@@ -189,7 +216,7 @@ export default function SendPage() {
             {/* Send Button */}
             <Button
               onClick={handleSend}
-              disabled={!isValidForm || isSending || isEncrypting}
+              disabled={!isValidForm || isSending || isEncrypting || lifecycle === 'pending'}
               className="w-full gap-2"
               size="lg"
             >
@@ -211,10 +238,14 @@ export default function SendPage() {
               )}
             </Button>
 
-            {txHash && (
+            {transactionHash && (
               <p className="text-xs text-muted-foreground">
-                Last transaction hash: <span className="font-mono">{txHash}</span>
+                Last transaction hash: <span className="font-mono">{transactionHash}</span>
               </p>
+            )}
+
+            {lifecycle === 'failure' && (
+              <p className="text-xs text-destructive">Transaction failed. Check logs for details and try again.</p>
             )}
           </div>
         </Card>
@@ -234,6 +265,18 @@ export default function SendPage() {
             </div>
           </div>
         </Card>
+
+        <TransactionSuccessModal
+          open={successOpen}
+          onOpenChange={(open) => {
+            setSuccessOpen(open);
+            if (!open) {
+              resetLifecycle();
+            }
+          }}
+          transaction={lastTransaction}
+          onViewTransaction={() => setSuccessOpen(false)}
+        />
       </div>
     </AppLayout>
   );
