@@ -17,6 +17,7 @@ export interface Transaction {
   token: string;
   note?: string;
   encryptedNote?: string;
+  decryptedNote?: string;
   timestamp: number;
   status: 'pending' | 'confirmed' | 'failed';
   type: 'send' | 'receive';

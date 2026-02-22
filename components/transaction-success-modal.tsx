@@ -80,6 +80,15 @@ export function TransactionSuccessModal({
                 )}
               </button>
             </div>
+            {transaction.decryptedNote && (
+              <>
+                <div className="h-px bg-border/50" />
+                <div className="space-y-2">
+                  <span className="text-sm text-muted-foreground">Decrypted Private Note</span>
+                  <p className="rounded-lg bg-primary/5 px-3 py-2 text-sm">{transaction.decryptedNote}</p>
+                </div>
+              </>
+            )}
             {transaction.isPrivate && (
               <>
                 <div className="h-px bg-border/50" />
