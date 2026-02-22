@@ -19,11 +19,16 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Lock, Send, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 import { isValidAddress } from '@/lib/blockchain';
-import { encryptMessage } from '@/lib/crypto';
 import { useSendStrk } from '@/hooks/useSendStrk';
 import { useTokenBalance } from '@/hooks/useTokenBalance';
 import { TransactionSuccessModal } from '@/components/transaction-success-modal';
 import type { Transaction } from '@/lib/blockchain';
+import {
+  decryptTransactionNote,
+  encryptTransactionNote,
+  resolveRecipientPublicKey,
+  storeEncryptedNoteMetadata,
+} from '@/lib/privacy';
 
 export default function SendPage() {
   const { sendStrk, isSending, transactionHash, lifecycle, resetLifecycle } = useSendStrk();
@@ -59,13 +64,34 @@ export default function SendPage() {
     setError('');
 
     try {
+      let encryptedPayload: string | undefined;
+      let decryptedNote: string | undefined;
+
       if (isPrivate && note) {
         setIsEncrypting(true);
-        await encryptMessage(note);
+        const senderPublicKey = address;
+        if (!senderPublicKey) {
+          throw new Error('Wallet not connected');
+        }
+
+        const recipientPublicKey = resolveRecipientPublicKey(recipient);
+        const encrypted = await encryptTransactionNote(note, senderPublicKey, recipientPublicKey);
+        encryptedPayload = JSON.stringify(encrypted);
+        decryptedNote = await decryptTransactionNote(encrypted, senderPublicKey, recipientPublicKey);
         setIsEncrypting(false);
+      } else if (isPrivate && !note.trim()) {
+        throw new Error('Privacy mode requires a note to encrypt');
       }
 
       const hash = await sendStrk(recipient, amount);
+
+      if (isPrivate && encryptedPayload) {
+        storeEncryptedNoteMetadata({
+          txHash: hash,
+          payload: JSON.parse(encryptedPayload),
+          createdAt: Date.now(),
+        });
+      }
 
       setLastTransaction({
         id: `tx-${Date.now()}`,
@@ -73,7 +99,9 @@ export default function SendPage() {
         to: recipient,
         amount,
         token,
-        note,
+        note: isPrivate ? undefined : note,
+        encryptedNote: encryptedPayload,
+        decryptedNote,
         timestamp: Date.now(),
         status: 'confirmed',
         type: 'send',
