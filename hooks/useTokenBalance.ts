@@ -1,51 +1,82 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Contract } from 'starknet';
 import { useAccount } from '@starknet-react/core';
-
-const ERC20_ABI = [
-  {
-    name: 'balanceOf',
-    type: 'function',
-    inputs: [{ name: 'account', type: 'felt' }],
-    outputs: [{ name: 'balance', type: 'Uint256' }],
-    stateMutability: 'view',
-  },
-] as const;
+import { CallData, RpcProvider } from 'starknet';
 
 const STRK_ADDRESS =
-  '0x04718f5a0fc34cc1af16a1b11f5dbebf0c7db8d19a0e7c5d6c0f5c5b5c5b5c5';
+  '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
 const STRK_DECIMALS = 18;
 const STARKNET_SEPOLIA_CHAIN_ID = '0x534e5f5345504f4c4941';
+const RPC_ENDPOINTS = [
+  'https://starknet-sepolia-rpc.publicnode.com',
+  'https://rpc.starknet-testnet.lava.build:443',
+] as const;
 
-type Uint256Like = {
-  low: string | number | bigint;
-  high: string | number | bigint;
+type ContractCaller = {
+  callContract: (request: {
+    contractAddress: string;
+    entrypoint: string;
+    calldata: string[];
+  }) => Promise<unknown>;
 };
 
-const uint256ToBigInt = (value: Uint256Like): bigint => {
-  const low = BigInt(value.low);
-  const high = BigInt(value.high);
+const parseUint256FromCall = (result: unknown): bigint => {
+  if (Array.isArray(result) && result.length >= 2) {
+    return (BigInt(result[1]) << BigInt(128)) + BigInt(result[0]);
+  }
 
-  return (high << BigInt(128)) + low;
+  if (result && typeof result === 'object') {
+    const value = result as Record<string, unknown>;
+
+    if (value.low !== undefined && value.high !== undefined) {
+      return (BigInt(value.high as string | number | bigint) << BigInt(128)) + BigInt(value.low as string | number | bigint);
+    }
+
+    if (value.balance && typeof value.balance === 'object') {
+      const balance = value.balance as Record<string, unknown>;
+      if (balance.low !== undefined && balance.high !== undefined) {
+        return (BigInt(balance.high as string | number | bigint) << BigInt(128)) + BigInt(balance.low as string | number | bigint);
+      }
+    }
+  }
+
+  throw new Error('Unexpected Uint256 response');
 };
 
-const formatTokenBalance = (value: bigint, decimals: number): string => {
-  const raw = value.toString().padStart(decimals + 1, '0');
+const formatTokenBalance = (rawBalance: bigint, decimals: number): string => {
+  const raw = rawBalance.toString().padStart(decimals + 1, '0');
   const whole = raw.slice(0, raw.length - decimals);
   const fractional = raw.slice(raw.length - decimals, raw.length - decimals + 4);
-
   return `${whole}.${fractional}`;
 };
 
+const fetchBalanceWithCaller = async (caller: ContractCaller, address: string): Promise<bigint> => {
+  const calldata = CallData.compile({ account: address });
+
+  for (const entrypoint of ['balance_of', 'balanceOf'] as const) {
+    try {
+      const result = await caller.callContract({
+        contractAddress: STRK_ADDRESS,
+        entrypoint,
+        calldata,
+      });
+      return parseUint256FromCall(result);
+    } catch {
+      // Try the next entrypoint/provider.
+    }
+  }
+
+  throw new Error('Failed to read STRK balance');
+};
+
 export function useTokenBalance() {
-  const { address, isConnected, account } = useAccount();
+  const { address, account, isConnected } = useAccount();
   const [balance, setBalance] = useState('0.0000');
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!isConnected || !address || !account) {
+    if (!isConnected || !address) {
       setBalance('0.0000');
       return;
     }
@@ -53,33 +84,47 @@ export function useTokenBalance() {
     let isCancelled = false;
 
     const fetchBalance = async () => {
-      try {
+      if (!isCancelled) {
         setLoading(true);
+      }
 
-        const chainId = await account.getChainId();
-        if (chainId !== STARKNET_SEPOLIA_CHAIN_ID) {
-          setBalance('0.0000');
-          return;
+      try {
+        const callers: ContractCaller[] = [
+          ...RPC_ENDPOINTS.map((nodeUrl) => new RpcProvider({ nodeUrl })),
+        ];
+
+        if (account && typeof account.callContract === 'function') {
+          const chainId = await account.getChainId();
+          if (chainId !== STARKNET_SEPOLIA_CHAIN_ID) {
+            if (!isCancelled) {
+              setBalance('0.0000');
+            }
+            return;
+          }
+
+          callers.push(account as unknown as ContractCaller);
         }
 
-        const contract = new Contract({
-          abi: ERC20_ABI,
-          address: STRK_ADDRESS,
-          providerOrAccount: account,
-        });
+        let rawBalance: bigint | null = null;
 
-        const result = (await contract.balanceOf(address)) as {
-          balance: Uint256Like;
-        };
+        for (const caller of callers) {
+          try {
+            rawBalance = await fetchBalanceWithCaller(caller, address);
+            break;
+          } catch {
+            // Try next RPC/account caller.
+          }
+        }
 
-        const rawBalance = uint256ToBigInt(result.balance);
-        const formattedBalance = formatTokenBalance(rawBalance, STRK_DECIMALS);
+        if (rawBalance === null) {
+          throw new Error('All balance providers failed');
+        }
 
         if (!isCancelled) {
-          setBalance(formattedBalance);
+          setBalance(formatTokenBalance(rawBalance, STRK_DECIMALS));
         }
-      } catch (err) {
-        console.error('STRK balance error:', err);
+      } catch (error) {
+        console.error('STRK balance error:', error);
         if (!isCancelled) {
           setBalance('0.0000');
         }
@@ -91,7 +136,13 @@ export function useTokenBalance() {
     };
 
     fetchBalance();
-  }, [address, isConnected, account]);
+    const interval = setInterval(fetchBalance, 15000);
+
+    return () => {
+      isCancelled = true;
+      clearInterval(interval);
+    };
+  }, [isConnected, address, account]);
 
   return { balance, loading };
 }

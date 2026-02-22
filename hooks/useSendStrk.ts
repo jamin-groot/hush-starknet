@@ -5,7 +5,7 @@ import { useAccount } from '@starknet-react/core';
 import { cairo, Contract, validateAndParseAddress } from 'starknet';
 
 const STRK_ADDRESS =
-  '0x04718f5a0fc34cc1af16a1b11f5dbebf0c7db8d19a0e7c5d6c0f5c5b5c5b5c5';
+  '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
 const STRK_DECIMALS = 18;
 
 const ERC20_ABI = [
