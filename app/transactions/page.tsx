@@ -39,7 +39,14 @@ export default function TransactionsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [highlightedHash, setHighlightedHash] = useState<string | null>(null);
-  const inboxNotes: InboxNote[] = messages;
+  const inboxNotes: InboxNote[] = messages
+    .filter((message) => message.direction === 'received' && Boolean(message.txHash))
+    .map((message) => ({
+      txHash: message.txHash as string,
+      from: message.from,
+      createdAt: message.createdAt,
+      plaintext: message.plaintext,
+    }));
 
   useEffect(() => {
     if (typeof window === 'undefined') return;

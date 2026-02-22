@@ -6,6 +6,7 @@ import type { Transaction } from '@/lib/blockchain';
 import {
   getEncryptedMessagesForWallet,
   decryptTransactionNote,
+  resolveOutgoingMessagePreview,
   type StoredEncryptedNote,
 } from '@/lib/privacy';
 import {
@@ -274,7 +275,16 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
   const decrypted = await Promise.all(
     encryptedNotes.map(async (entry) => {
       try {
-        const payload = entry.payload as StoredEncryptedNote['payload'];
+        const payload = entry.payload as StoredEncryptedNote['payload'] & {
+          meta?: {
+            type?: 'payment_note' | 'chat' | 'request';
+            requestId?: string;
+            amount?: string;
+            status?: 'pending' | 'paid' | 'expired' | 'rejected';
+            expiresAt?: number;
+            paidTxHash?: string;
+          };
+        };
         if (!payload?.senderAddress || !payload?.recipientAddress) {
           return null;
         }
@@ -283,12 +293,17 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
         const recipientAddress = payload.recipientAddress;
         const direction = normalize(senderAddress) === normalize(address) ? 'sent' : 'received';
         const counterparty = direction === 'sent' ? recipientAddress : senderAddress;
-        const requestStatus = entry.status;
+        const requestStatus = entry.status ?? payload.meta?.status;
+        const requestKind = entry.kind ?? payload.meta?.type ?? (entry.txHash ? 'payment_note' : 'chat');
+        const requestId = entry.requestId ?? payload.meta?.requestId;
+        const amount = entry.amount ?? payload.meta?.amount;
+        const expiresAt = entry.expiresAt ?? payload.meta?.expiresAt;
+        const paidTxHash = entry.paidTxHash ?? payload.meta?.paidTxHash;
         const derivedRequestStatus: RequestStatus | undefined =
-          entry.kind === 'request'
+          requestKind === 'request'
             ? requestStatus === 'paid' || requestStatus === 'rejected'
               ? requestStatus
-              : typeof entry.expiresAt === 'number' && entry.expiresAt < Date.now()
+              : typeof expiresAt === 'number' && expiresAt < Date.now()
                 ? 'expired'
                 : 'pending'
             : undefined;
@@ -296,12 +311,12 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
         return {
           id: entry.id ?? entry.txHash ?? `msg-${entry.createdAt}`,
           txHash: entry.txHash,
-          kind: entry.kind ?? (entry.txHash ? 'payment_note' : 'chat'),
-          requestId: entry.requestId,
-          amount: entry.amount,
+          kind: requestKind,
+          requestId,
+          amount,
           requestStatus: derivedRequestStatus,
-          expiresAt: entry.expiresAt,
-          paidTxHash: entry.paidTxHash,
+          expiresAt,
+          paidTxHash,
           from: senderAddress,
           to: recipientAddress,
           counterparty,
@@ -311,7 +326,61 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
           plaintext,
         } satisfies RealtimeMessage;
       } catch {
-        return null;
+        const payload = entry.payload as StoredEncryptedNote['payload'] & {
+          senderAddress?: string;
+          recipientAddress?: string;
+        };
+        if (!payload?.senderAddress || !payload?.recipientAddress) {
+          return null;
+        }
+
+        const senderAddress = payload.senderAddress;
+        const recipientAddress = payload.recipientAddress;
+        const direction = normalize(senderAddress) === normalize(address) ? 'sent' : 'received';
+        if (direction !== 'sent') {
+          return null;
+        }
+
+        const preview = resolveOutgoingMessagePreview(payload, address);
+        if (!preview) {
+          return null;
+        }
+
+        const requestStatus = entry.status ?? (payload as { meta?: { status?: RequestStatus } }).meta?.status;
+        const requestKind =
+          entry.kind ??
+          (payload as { meta?: { type?: 'payment_note' | 'chat' | 'request' } }).meta?.type ??
+          (entry.txHash ? 'payment_note' : 'chat');
+        const requestId = entry.requestId ?? (payload as { meta?: { requestId?: string } }).meta?.requestId;
+        const amount = entry.amount ?? (payload as { meta?: { amount?: string } }).meta?.amount;
+        const expiresAt = entry.expiresAt ?? (payload as { meta?: { expiresAt?: number } }).meta?.expiresAt;
+        const paidTxHash = entry.paidTxHash ?? (payload as { meta?: { paidTxHash?: string } }).meta?.paidTxHash;
+        const derivedRequestStatus: RequestStatus | undefined =
+          requestKind === 'request'
+            ? requestStatus === 'paid' || requestStatus === 'rejected'
+              ? requestStatus
+              : typeof expiresAt === 'number' && expiresAt < Date.now()
+                ? 'expired'
+                : 'pending'
+            : undefined;
+
+        return {
+          id: entry.id ?? entry.txHash ?? `msg-${entry.createdAt}`,
+          txHash: entry.txHash,
+          kind: requestKind,
+          requestId,
+          amount,
+          requestStatus: derivedRequestStatus,
+          expiresAt,
+          paidTxHash,
+          from: senderAddress,
+          to: recipientAddress,
+          counterparty: recipientAddress,
+          direction: 'sent',
+          isPaymentLinked: Boolean(entry.txHash),
+          createdAt: entry.createdAt,
+          plaintext: preview,
+        } satisfies RealtimeMessage;
       }
     })
   );

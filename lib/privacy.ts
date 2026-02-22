@@ -6,6 +6,14 @@ export interface EncryptedNotePayload {
   encryptedKey: string;
   iv: string;
   ciphertext: string;
+  meta?: {
+    type?: 'payment_note' | 'chat' | 'request';
+    requestId?: string;
+    amount?: string;
+    status?: 'pending' | 'paid' | 'expired' | 'rejected';
+    expiresAt?: number;
+    paidTxHash?: string;
+  };
 }
 
 export interface StoredEncryptedNote {
@@ -27,6 +35,7 @@ interface LocalKeyRecord {
 }
 
 const LOCAL_KEYS_STORAGE = 'hush.encryptionKeys.v2';
+const LOCAL_OUTGOING_PREVIEWS_STORAGE = 'hush.outgoingMessagePreviews.v1';
 
 const normalizeAddress = (value: string): string => value.trim().toLowerCase();
 
@@ -69,6 +78,37 @@ const writeLocalKeyMap = (value: Record<string, LocalKeyRecord>): void => {
     return;
   }
   window.localStorage.setItem(LOCAL_KEYS_STORAGE, JSON.stringify(value));
+};
+
+interface OutgoingMessagePreview {
+  ciphertext: string;
+  senderAddress: string;
+  recipientAddress: string;
+  plaintext: string;
+  createdAt: number;
+}
+
+const readOutgoingPreviewMap = (): Record<string, OutgoingMessagePreview> => {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(LOCAL_OUTGOING_PREVIEWS_STORAGE);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Record<string, OutgoingMessagePreview>;
+    return parsed ?? {};
+  } catch {
+    return {};
+  }
+};
+
+const writeOutgoingPreviewMap = (value: Record<string, OutgoingMessagePreview>): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.localStorage.setItem(LOCAL_OUTGOING_PREVIEWS_STORAGE, JSON.stringify(value));
 };
 
 async function registerPublicKey(address: string, publicKeyJwk: JsonWebKey): Promise<void> {
@@ -139,7 +179,8 @@ const getPrivateKeyJwk = (address: string): JsonWebKey => {
 export async function encryptTransactionNote(
   note: string,
   senderAddress: string,
-  recipientAddress: string
+  recipientAddress: string,
+  meta?: EncryptedNotePayload['meta']
 ): Promise<EncryptedNotePayload> {
   const trimmed = note.trim();
   if (!trimmed) {
@@ -182,6 +223,7 @@ export async function encryptTransactionNote(
     encryptedKey: toBase64(encryptedKey),
     iv: toBase64(iv.buffer),
     ciphertext: toBase64(ciphertext),
+    meta,
   };
 }
 
@@ -277,6 +319,17 @@ export async function storePaymentRequestMessage(record: {
   const requestId = record.requestId ?? `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const createdAt = record.createdAt ?? Date.now();
   const expiresAt = record.expiresAt ?? createdAt + 24 * 60 * 60 * 1000;
+  const payloadWithMeta: EncryptedNotePayload = {
+    ...record.payload,
+    meta: {
+      ...(record.payload.meta ?? {}),
+      type: 'request',
+      requestId,
+      amount: record.amount,
+      status: 'pending',
+      expiresAt,
+    },
+  };
 
   await storeEncryptedNoteMetadata({
     id: `msg-${Date.now()}`,
@@ -285,7 +338,7 @@ export async function storePaymentRequestMessage(record: {
     amount: record.amount,
     status: 'pending',
     expiresAt,
-    payload: record.payload,
+    payload: payloadWithMeta,
     createdAt,
   });
 
@@ -313,4 +366,44 @@ export async function updatePaymentRequestMessage(record: {
 
 export async function resolveRecipientPublicKey(recipientAddress: string): Promise<JsonWebKey> {
   return fetchPublicKeyForAddress(recipientAddress);
+}
+
+export function rememberOutgoingMessagePreview(payload: EncryptedNotePayload, plaintext: string): void {
+  const trimmed = plaintext.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  const map = readOutgoingPreviewMap();
+  map[payload.ciphertext] = {
+    ciphertext: payload.ciphertext,
+    senderAddress: normalizeAddress(payload.senderAddress),
+    recipientAddress: normalizeAddress(payload.recipientAddress),
+    plaintext: trimmed,
+    createdAt: Date.now(),
+  };
+
+  const entries = Object.entries(map)
+    .sort((a, b) => b[1].createdAt - a[1].createdAt)
+    .slice(0, 1000);
+  writeOutgoingPreviewMap(Object.fromEntries(entries));
+}
+
+export function resolveOutgoingMessagePreview(
+  payload: EncryptedNotePayload,
+  walletAddress: string
+): string | null {
+  const map = readOutgoingPreviewMap();
+  const entry = map[payload.ciphertext];
+  if (!entry) {
+    return null;
+  }
+  const normalizedWallet = normalizeAddress(walletAddress);
+  if (entry.senderAddress !== normalizedWallet) {
+    return null;
+  }
+  if (entry.recipientAddress !== normalizeAddress(payload.recipientAddress)) {
+    return null;
+  }
+  return entry.plaintext;
 }

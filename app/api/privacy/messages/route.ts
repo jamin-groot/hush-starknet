@@ -44,6 +44,10 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as MessageBody;
+    const payloadMeta =
+      body.payload && typeof body.payload === 'object'
+        ? ((body.payload as { meta?: { type?: 'payment_note' | 'chat' | 'request' } }).meta ?? undefined)
+        : undefined;
 
     if (!body.payload) {
       return NextResponse.json({ error: 'payload is required' }, { status: 400 });
@@ -52,7 +56,7 @@ export async function POST(request: Request) {
     await saveEncryptedMessage({
       id: body.id ?? `msg-${Date.now()}`,
       txHash: body.txHash,
-      kind: body.kind ?? (body.txHash ? 'payment_note' : 'chat'),
+      kind: body.kind ?? payloadMeta?.type ?? (body.txHash ? 'payment_note' : 'chat'),
       requestId: body.requestId,
       amount: body.amount,
       status: body.status,

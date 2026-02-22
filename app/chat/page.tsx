@@ -23,6 +23,7 @@ import {
   storeEncryptedChatMessage,
   storePaymentRequestMessage,
   updatePaymentRequestMessage,
+  rememberOutgoingMessagePreview,
 } from '@/lib/privacy';
 import { Lock, Search, Send, Loader2, ExternalLink } from 'lucide-react';
 
@@ -186,6 +187,7 @@ export default function ChatPage() {
     const now = Date.now();
     const optimisticId = `chat-${now}`;
     const optimisticHash = `pending-chat-${now}`;
+    const generatedRequestId = `req-${now}-${Math.random().toString(36).slice(2, 8)}`;
 
     try {
       await ensureEncryptionIdentity(address);
@@ -194,13 +196,28 @@ export default function ChatPage() {
         (composeMode === 'request'
           ? `Payment request for ${amount} STRK`
           : 'Encrypted chat message');
-      const encrypted = await encryptTransactionNote(contentToEncrypt, address, activeCounterparty);
+      const encrypted = await encryptTransactionNote(
+        contentToEncrypt,
+        address,
+        activeCounterparty,
+        composeMode === 'request'
+          ? {
+              type: 'request',
+              requestId: generatedRequestId,
+              amount,
+              status: 'pending',
+              expiresAt: now + 24 * 60 * 60 * 1000,
+            }
+          : undefined
+      );
+      rememberOutgoingMessagePreview(encrypted, contentToEncrypt);
 
       if (composeMode === 'request') {
         await storePaymentRequestMessage({
           payload: encrypted,
           amount,
           createdAt: now,
+          requestId: generatedRequestId,
         });
         await refreshNow(account);
       } else if (!attachPayment) {
@@ -372,7 +389,7 @@ export default function ChatPage() {
                       <div className="mb-1 flex items-center gap-2">
                         <Lock className="h-3 w-3 text-primary" />
                         <span className="text-[11px] text-muted-foreground">Encrypted</span>
-                        {message.isPaymentLinked && (
+                        {message.isPaymentLinked && message.kind !== 'request' && (
                           <Badge variant={lifecycleVariant(message.lifecycle as LocalLifecycle | undefined)} className="h-4 text-[10px]">
                             {message.lifecycle ?? 'confirmed'}
                           </Badge>

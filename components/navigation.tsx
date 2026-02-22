@@ -11,6 +11,7 @@ import {
   Settings,
   QrCode,
   History,
+  MessageCircle,
 } from 'lucide-react';
 
 const navigation = [
@@ -33,6 +34,11 @@ const navigation = [
     name: 'Transactions',
     href: '/transactions',
     icon: History,
+  },
+  {
+    name: 'Chat',
+    href: '/chat',
+    icon: MessageCircle,
   },
   {
     name: 'Invoices',
