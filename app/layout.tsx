@@ -2,6 +2,8 @@ import type { Metadata } from 'next'
 import localFont from 'next/font/local'
 import { Analytics } from '@vercel/analytics/next'
 import { StarknetProvider } from '@/components/starknet-provider'
+import { Toaster } from '@/components/ui/toaster'
+import { RealtimeToastListener } from '@/components/realtime-toast-listener'
 import './globals.css'
 
 const _figtree = localFont({
@@ -78,6 +80,8 @@ export default function RootLayout({
       <body className="font-sans antialiased">
         <StarknetProvider>
           {children}
+          <RealtimeToastListener />
+          <Toaster />
           <Analytics />
         </StarknetProvider>
       </body>
