@@ -24,9 +24,8 @@ import { useTokenBalance } from '@/hooks/useTokenBalance';
 import { TransactionSuccessModal } from '@/components/transaction-success-modal';
 import type { Transaction } from '@/lib/blockchain';
 import {
-  decryptTransactionNote,
+  ensureEncryptionIdentity,
   encryptTransactionNote,
-  resolveRecipientPublicKey,
   storeEncryptedNoteMetadata,
 } from '@/lib/privacy';
 
@@ -65,19 +64,17 @@ export default function SendPage() {
 
     try {
       let encryptedPayload: string | undefined;
-      let decryptedNote: string | undefined;
 
       if (isPrivate && note) {
         setIsEncrypting(true);
-        const senderPublicKey = address;
-        if (!senderPublicKey) {
+        const senderAddress = address;
+        if (!senderAddress) {
           throw new Error('Wallet not connected');
         }
 
-        const recipientPublicKey = resolveRecipientPublicKey(recipient);
-        const encrypted = await encryptTransactionNote(note, senderPublicKey, recipientPublicKey);
+        await ensureEncryptionIdentity(senderAddress);
+        const encrypted = await encryptTransactionNote(note, senderAddress, recipient);
         encryptedPayload = JSON.stringify(encrypted);
-        decryptedNote = await decryptTransactionNote(encrypted, senderPublicKey, recipientPublicKey);
         setIsEncrypting(false);
       } else if (isPrivate && !note.trim()) {
         throw new Error('Privacy mode requires a note to encrypt');
@@ -86,7 +83,7 @@ export default function SendPage() {
       const hash = await sendStrk(recipient, amount, balance);
 
       if (isPrivate && encryptedPayload) {
-        storeEncryptedNoteMetadata({
+        await storeEncryptedNoteMetadata({
           txHash: hash,
           payload: JSON.parse(encryptedPayload),
           createdAt: Date.now(),
@@ -101,7 +98,6 @@ export default function SendPage() {
         token,
         note: isPrivate ? undefined : note,
         encryptedNote: encryptedPayload,
-        decryptedNote,
         timestamp: Date.now(),
         status: 'confirmed',
         type: 'send',

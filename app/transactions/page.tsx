@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useAccount } from '@starknet-react/core';
 import { AppLayout } from '@/components/app-layout';
 import { TransactionCard } from '@/components/transaction-card';
 import { Button } from '@/components/ui/button';
@@ -24,12 +25,56 @@ import { Badge } from '@/components/ui/badge';
 import { Search, Filter, Copy, ExternalLink, Lock } from 'lucide-react';
 import { getTransactions, formatAddress } from '@/lib/blockchain';
 import type { Transaction } from '@/lib/blockchain';
+import { decryptTransactionNote, getEncryptedNotesForRecipient } from '@/lib/privacy';
+
+interface InboxNote {
+  txHash: string;
+  from: string;
+  createdAt: number;
+  plaintext: string;
+}
 
 export default function TransactionsPage() {
+  const { address } = useAccount();
   const [transactions] = useState(getTransactions());
   const [filter, setFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
+  const [inboxNotes, setInboxNotes] = useState<InboxNote[]>([]);
+
+  useEffect(() => {
+    const loadInbox = async () => {
+      if (!address) {
+        setInboxNotes([]);
+        return;
+      }
+
+      try {
+        const encryptedNotes = await getEncryptedNotesForRecipient(address);
+        const decrypted = await Promise.all(
+          encryptedNotes.map(async (entry) => {
+            try {
+              const plaintext = await decryptTransactionNote(entry.payload, address);
+              return {
+                txHash: entry.txHash,
+                from: entry.payload.senderAddress,
+                createdAt: entry.createdAt,
+                plaintext,
+              } satisfies InboxNote;
+            } catch {
+              return null;
+            }
+          })
+        );
+
+        setInboxNotes(decrypted.filter((note): note is InboxNote => note !== null));
+      } catch {
+        setInboxNotes([]);
+      }
+    };
+
+    loadInbox();
+  }, [address]);
 
   const filteredTransactions = transactions.filter((tx) => {
     const matchesFilter =
@@ -91,6 +136,24 @@ export default function TransactionsPage() {
         </Card>
 
         {/* Transaction List */}
+        {inboxNotes.length > 0 && (
+          <Card className="border border-primary/20 bg-primary/5 p-6">
+            <h3 className="mb-4 text-lg font-semibold">Private Messages For You</h3>
+            <div className="space-y-3">
+              {inboxNotes.map((note) => (
+                <div key={note.txHash} className="rounded-lg border border-primary/20 bg-background/60 p-4">
+                  <div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">
+                    <span>From: {formatAddress(note.from)}</span>
+                    <span>{new Date(note.createdAt).toLocaleString()}</span>
+                  </div>
+                  <p className="text-sm">{note.plaintext}</p>
+                  <p className="mt-2 font-mono text-xs text-muted-foreground">Tx: {formatAddress(note.txHash)}</p>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
+
         <div className="space-y-3">
           {filteredTransactions.length > 0 ? (
             filteredTransactions.map((tx) => (

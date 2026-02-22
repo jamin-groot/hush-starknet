@@ -5,4 +5,5 @@ node_modules
 dist
 build
 .DS_Store
+data/privacy-store.json
 

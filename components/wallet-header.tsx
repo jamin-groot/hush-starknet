@@ -6,6 +6,7 @@ import { Wallet, Copy, Check } from 'lucide-react';
 import { useAccount, useConnect } from '@starknet-react/core';
 import { formatAddress } from '@/lib/blockchain';
 import { useWalletStore } from '@/store/walletStore';
+import { ensureEncryptionIdentity } from '@/lib/privacy';
 
 export function WalletHeader() {
   const { address, isConnected } = useAccount();
@@ -19,6 +20,9 @@ export function WalletHeader() {
   useEffect(() => {
     if (isConnected && address) {
       setWallet(address);
+      ensureEncryptionIdentity(address).catch((error) => {
+        console.error('Failed to initialize privacy keys:', error);
+      });
     }
   }, [isConnected, address, setWallet]);
 

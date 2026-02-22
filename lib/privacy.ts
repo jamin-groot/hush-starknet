@@ -1,11 +1,11 @@
 export interface EncryptedNotePayload {
-  version: 'hush-note-v1';
-  algorithm: 'AES-GCM-256';
-  senderPublicKey: string;
-  recipientPublicKey: string;
-  ciphertext: string;
+  version: 'hush-note-v2';
+  algorithm: 'RSA-OAEP-2048/AES-GCM-256';
+  senderAddress: string;
+  recipientAddress: string;
+  encryptedKey: string;
   iv: string;
-  salt: string;
+  ciphertext: string;
 }
 
 export interface StoredEncryptedNote {
@@ -14,56 +14,26 @@ export interface StoredEncryptedNote {
   createdAt: number;
 }
 
-const STORAGE_KEY = 'hush.encryptedNotes';
-
-const normalizePublicKey = (value: string): string => value.trim().toLowerCase();
-
-const isLikelyPublicKey = (value: string): boolean => /^0x[0-9a-f]+$/i.test(value.trim());
-
-async function deriveSharedSecret(
-  senderPublicKey: string,
-  recipientPublicKey: string,
-  salt: Uint8Array
-): Promise<CryptoKey> {
-  const encoder = new TextEncoder();
-  const normalizedSender = normalizePublicKey(senderPublicKey);
-  const normalizedRecipient = normalizePublicKey(recipientPublicKey);
-
-  const keyMaterial = `${normalizedSender}:${normalizedRecipient}`;
-
-  const passwordKey = await crypto.subtle.importKey(
-    'raw',
-    encoder.encode(keyMaterial),
-    'PBKDF2',
-    false,
-    ['deriveKey']
-  );
-
-  return crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt,
-      iterations: 100000,
-      hash: 'SHA-256',
-    },
-    passwordKey,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt']
-  );
+interface LocalKeyRecord {
+  publicKeyJwk: JsonWebKey;
+  privateKeyJwk: JsonWebKey;
 }
 
-const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+const LOCAL_KEYS_STORAGE = 'hush.encryptionKeys.v2';
+
+const normalizeAddress = (value: string): string => value.trim().toLowerCase();
+
+const toBase64 = (buffer: ArrayBuffer): string => {
   const bytes = new Uint8Array(buffer);
   let binary = '';
-  for (let i = 0; i < bytes.byteLength; i += 1) {
+  for (let i = 0; i < bytes.length; i += 1) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
 };
 
-const base64ToArrayBuffer = (base64: string): ArrayBuffer => {
-  const binary = atob(base64);
+const fromBase64 = (value: string): ArrayBuffer => {
+  const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) {
     bytes[i] = binary.charCodeAt(i);
@@ -71,94 +41,193 @@ const base64ToArrayBuffer = (base64: string): ArrayBuffer => {
   return bytes.buffer;
 };
 
-export function resolveRecipientPublicKey(recipientAddress: string): string {
-  if (!isLikelyPublicKey(recipientAddress)) {
-    throw new Error('Missing recipient public key');
+const readLocalKeyMap = (): Record<string, LocalKeyRecord> => {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(LOCAL_KEYS_STORAGE);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Record<string, LocalKeyRecord>;
+    return parsed ?? {};
+  } catch {
+    return {};
+  }
+};
+
+const writeLocalKeyMap = (value: Record<string, LocalKeyRecord>): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.localStorage.setItem(LOCAL_KEYS_STORAGE, JSON.stringify(value));
+};
+
+async function registerPublicKey(address: string, publicKeyJwk: JsonWebKey): Promise<void> {
+  const response = await fetch('/api/privacy/register-key', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: normalizeAddress(address), publicKeyJwk }),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to register encryption key');
+  }
+}
+
+async function fetchPublicKeyForAddress(address: string): Promise<JsonWebKey> {
+  const response = await fetch(`/api/privacy/public-key/${normalizeAddress(address)}`);
+
+  if (!response.ok) {
+    throw new Error('Recipient has not registered encryption yet');
   }
 
-  return normalizePublicKey(recipientAddress);
+  const data = (await response.json()) as { publicKeyJwk?: JsonWebKey };
+  if (!data.publicKeyJwk) {
+    throw new Error('Recipient public key missing');
+  }
+  return data.publicKeyJwk;
 }
+
+export async function ensureEncryptionIdentity(address: string): Promise<void> {
+  const normalized = normalizeAddress(address);
+  const map = readLocalKeyMap();
+  const existing = map[normalized];
+
+  if (existing?.publicKeyJwk && existing?.privateKeyJwk) {
+    await registerPublicKey(normalized, existing.publicKeyJwk);
+    return;
+  }
+
+  const pair = await crypto.subtle.generateKey(
+    {
+      name: 'RSA-OAEP',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['encrypt', 'decrypt']
+  );
+
+  const publicKeyJwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
+  const privateKeyJwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
+
+  map[normalized] = { publicKeyJwk, privateKeyJwk };
+  writeLocalKeyMap(map);
+  await registerPublicKey(normalized, publicKeyJwk);
+}
+
+const getPrivateKeyJwk = (address: string): JsonWebKey => {
+  const normalized = normalizeAddress(address);
+  const map = readLocalKeyMap();
+  const entry = map[normalized];
+  if (!entry?.privateKeyJwk) {
+    throw new Error('No local decryption key found for this wallet');
+  }
+  return entry.privateKeyJwk;
+};
 
 export async function encryptTransactionNote(
   note: string,
-  senderPublicKey: string,
-  recipientPublicKey: string
+  senderAddress: string,
+  recipientAddress: string
 ): Promise<EncryptedNotePayload> {
-  if (!note || !note.trim()) {
+  const trimmed = note.trim();
+  if (!trimmed) {
     throw new Error('Privacy mode requires a note to encrypt');
   }
-
-  const normalizedNote = note.trim();
-  if (normalizedNote.length > 280) {
+  if (trimmed.length > 280) {
     throw new Error('Invalid note format');
   }
 
-  const encoder = new TextEncoder();
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveSharedSecret(senderPublicKey, recipientPublicKey, salt);
+  const normalizedSender = normalizeAddress(senderAddress);
+  const normalizedRecipient = normalizeAddress(recipientAddress);
 
-  const encrypted = await crypto.subtle.encrypt(
+  await ensureEncryptionIdentity(normalizedSender);
+  const recipientPublicJwk = await fetchPublicKeyForAddress(normalizedRecipient);
+
+  const recipientPublicKey = await crypto.subtle.importKey(
+    'jwk',
+    recipientPublicJwk,
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    true,
+    ['encrypt']
+  );
+
+  const aesKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+  const rawAesKey = await crypto.subtle.exportKey('raw', aesKey);
+  const encryptedKey = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, recipientPublicKey, rawAesKey);
+
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
-    key,
-    encoder.encode(normalizedNote)
+    aesKey,
+    new TextEncoder().encode(trimmed)
   );
 
   return {
-    version: 'hush-note-v1',
-    algorithm: 'AES-GCM-256',
-    senderPublicKey: normalizePublicKey(senderPublicKey),
-    recipientPublicKey: normalizePublicKey(recipientPublicKey),
-    ciphertext: arrayBufferToBase64(encrypted),
-    iv: arrayBufferToBase64(iv),
-    salt: arrayBufferToBase64(salt),
+    version: 'hush-note-v2',
+    algorithm: 'RSA-OAEP-2048/AES-GCM-256',
+    senderAddress: normalizedSender,
+    recipientAddress: normalizedRecipient,
+    encryptedKey: toBase64(encryptedKey),
+    iv: toBase64(iv.buffer),
+    ciphertext: toBase64(ciphertext),
   };
 }
 
 export async function decryptTransactionNote(
   payload: EncryptedNotePayload,
-  senderPublicKey: string,
-  recipientPublicKey: string
+  recipientAddress: string
 ): Promise<string> {
-  const key = await deriveSharedSecret(senderPublicKey, recipientPublicKey, new Uint8Array(base64ToArrayBuffer(payload.salt)));
+  const privateKeyJwk = getPrivateKeyJwk(recipientAddress);
+  const privateKey = await crypto.subtle.importKey(
+    'jwk',
+    privateKeyJwk,
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    true,
+    ['decrypt']
+  );
+
+  const rawAesKey = await crypto.subtle.decrypt(
+    { name: 'RSA-OAEP' },
+    privateKey,
+    fromBase64(payload.encryptedKey)
+  );
+
+  const aesKey = await crypto.subtle.importKey('raw', rawAesKey, { name: 'AES-GCM' }, false, ['decrypt']);
   const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: new Uint8Array(base64ToArrayBuffer(payload.iv)) },
-    key,
-    base64ToArrayBuffer(payload.ciphertext)
+    { name: 'AES-GCM', iv: new Uint8Array(fromBase64(payload.iv)) },
+    aesKey,
+    fromBase64(payload.ciphertext)
   );
 
   return new TextDecoder().decode(decrypted);
 }
 
-const safeRead = (): StoredEncryptedNote[] => {
-  if (typeof window === 'undefined') return [];
+export async function storeEncryptedNoteMetadata(record: StoredEncryptedNote): Promise<void> {
+  const response = await fetch('/api/privacy/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(record),
+  });
 
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as StoredEncryptedNote[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+  if (!response.ok) {
+    throw new Error('Failed to persist encrypted note');
   }
-};
-
-export function storeEncryptedNoteMetadata(record: StoredEncryptedNote): void {
-  if (typeof window === 'undefined') return;
-
-  const existing = safeRead();
-  const withoutCurrent = existing.filter((entry) => entry.txHash !== record.txHash);
-  withoutCurrent.unshift(record);
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(withoutCurrent.slice(0, 100)));
 }
 
-export function getEncryptedNoteByHash(txHash: string): StoredEncryptedNote | null {
-  const existing = safeRead();
-  return existing.find((entry) => entry.txHash === txHash) ?? null;
+export async function getEncryptedNotesForRecipient(recipientAddress: string): Promise<StoredEncryptedNote[]> {
+  const response = await fetch(`/api/privacy/messages?recipient=${encodeURIComponent(normalizeAddress(recipientAddress))}`);
+  if (!response.ok) {
+    throw new Error('Failed to load encrypted notes');
+  }
+  const data = (await response.json()) as { messages?: StoredEncryptedNote[] };
+  return data.messages ?? [];
 }
 
-
-export function getEncryptedNotesForRecipient(recipientPublicKey: string): StoredEncryptedNote[] {
-  const normalized = normalizePublicKey(recipientPublicKey);
-  return safeRead().filter((entry) => entry.payload.recipientPublicKey === normalized);
+export async function resolveRecipientPublicKey(recipientAddress: string): Promise<JsonWebKey> {
+  return fetchPublicKeyForAddress(recipientAddress);
 }
