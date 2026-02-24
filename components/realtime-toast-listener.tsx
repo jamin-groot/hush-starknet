@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { Badge } from '@/components/ui/badge';
 import { toast } from '@/hooks/use-toast';
 import { useRealtimeStore } from '@/store/realtimeStore';
 import { formatAddress } from '@/lib/blockchain';
@@ -22,6 +21,9 @@ const ELIGIBLE_TYPES = new Set([
   'payment_request_paid',
   'payment_request_rejected',
   'payment_request_expired',
+  'stealth_payment_detected',
+  'stealth_claim_succeeded',
+  'stealth_claim_failed',
 ]);
 
 const normalizeToastEventKey = (notification: RealtimeNotification): string => {
@@ -39,13 +41,30 @@ const normalizeToastEventKey = (notification: RealtimeNotification): string => {
   if (notification.type === 'incoming_transfer') {
     return `incoming:${hash}`;
   }
+  if (notification.type === 'stealth_payment_detected') {
+    return `stealth-detected:${notification.dedupeKey}`;
+  }
+  if (notification.type === 'stealth_claim_succeeded') {
+    return `stealth-claimed:${notification.dedupeKey}`;
+  }
+  if (notification.type === 'stealth_claim_failed') {
+    return `stealth-claim-failed:${notification.dedupeKey}`;
+  }
   return `note:${hash}`;
 };
 
 const lifecycleVariant = (
-  lifecycle?: 'pending' | 'confirmed' | 'failed' | 'paid' | 'expired' | 'rejected'
+  lifecycle?:
+    | 'pending'
+    | 'confirmed'
+    | 'failed'
+    | 'paid'
+    | 'expired'
+    | 'rejected'
+    | 'claimable'
+    | 'claimed'
 ): 'secondary' | 'default' | 'destructive' => {
-  if (lifecycle === 'confirmed' || lifecycle === 'paid') return 'default';
+  if (lifecycle === 'confirmed' || lifecycle === 'paid' || lifecycle === 'claimed') return 'default';
   if (lifecycle === 'failed' || lifecycle === 'expired' || lifecycle === 'rejected') return 'destructive';
   return 'secondary';
 };
@@ -98,24 +117,8 @@ export function RealtimeToastListener() {
           }
           router.push('/transactions');
         },
-        title: (
-          <div className="flex items-center gap-2">
-            <span>{item.title}</span>
-            {item.metadata?.lifecycle && (
-              <Badge variant={lifecycleVariant(item.metadata.lifecycle)} className="h-4 px-1.5 text-[10px]">
-                {item.metadata.lifecycle}
-              </Badge>
-            )}
-          </div>
-        ),
-        description: (
-          <div className="space-y-1">
-            <p className="line-clamp-2 text-xs">{item.description}</p>
-            {previewBits.length > 0 && (
-              <p className="text-[11px] text-muted-foreground">{previewBits.join(' • ')}</p>
-            )}
-          </div>
-        ),
+        title: item.metadata?.lifecycle ? `${item.title} [${item.metadata.lifecycle}]` : item.title,
+        description: previewBits.length > 0 ? `${item.description} — ${previewBits.join(' • ')}` : item.description,
       });
     }
   }, [notifications, markNotificationRead, router]);

@@ -10,9 +10,17 @@ import { formatAddress } from '@/lib/blockchain';
 import { cn } from '@/lib/utils';
 
 const getLifecycleVariant = (
-  lifecycle?: 'pending' | 'confirmed' | 'failed' | 'paid' | 'expired' | 'rejected'
+  lifecycle?:
+    | 'pending'
+    | 'confirmed'
+    | 'failed'
+    | 'paid'
+    | 'expired'
+    | 'rejected'
+    | 'claimable'
+    | 'claimed'
 ) => {
-  if (lifecycle === 'confirmed' || lifecycle === 'paid') return 'default';
+  if (lifecycle === 'confirmed' || lifecycle === 'paid' || lifecycle === 'claimed') return 'default';
   if (lifecycle === 'failed' || lifecycle === 'expired' || lifecycle === 'rejected') return 'destructive';
   return 'secondary';
 };

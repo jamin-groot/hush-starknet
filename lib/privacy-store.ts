@@ -10,6 +10,15 @@ export interface StoredEncryptedMessage {
   amount?: string;
   status?: 'pending' | 'paid' | 'expired' | 'rejected';
   expiresAt?: number;
+  isStealth?: boolean;
+  stealthAddress?: string;
+  claimStatus?: 'pending' | 'claimable' | 'claimed' | 'failed';
+  claimTxHash?: string;
+  stealthDeployTxHash?: string;
+  stealthSalt?: string;
+  stealthClassHash?: string;
+  stealthPublicKey?: string;
+  derivationTag?: string;
   payload: unknown;
   createdAt: number;
 }
@@ -78,7 +87,18 @@ export async function saveEncryptedMessage(message: StoredEncryptedMessage): Pro
 
 export async function updateEncryptedMessage(
   match: { id?: string; requestId?: string },
-  updates: Partial<Pick<StoredEncryptedMessage, 'status' | 'paidTxHash' | 'txHash' | 'expiresAt'>>
+  updates: Partial<
+    Pick<
+      StoredEncryptedMessage,
+      | 'status'
+      | 'paidTxHash'
+      | 'txHash'
+      | 'expiresAt'
+      | 'claimStatus'
+      | 'claimTxHash'
+      | 'stealthDeployTxHash'
+    >
+  >
 ): Promise<StoredEncryptedMessage | null> {
   if (!match.id && !match.requestId) {
     return null;
@@ -112,6 +132,15 @@ export async function updateEncryptedMessage(
   }
   if (updates.expiresAt !== undefined) {
     next.expiresAt = updates.expiresAt;
+  }
+  if (updates.claimStatus !== undefined) {
+    next.claimStatus = updates.claimStatus;
+  }
+  if (updates.claimTxHash !== undefined) {
+    next.claimTxHash = updates.claimTxHash;
+  }
+  if (updates.stealthDeployTxHash !== undefined) {
+    next.stealthDeployTxHash = updates.stealthDeployTxHash;
   }
   store.messages[index] = next;
   await writeStore(store);

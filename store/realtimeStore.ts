@@ -9,6 +9,7 @@ import {
   resolveOutgoingMessagePreview,
   type StoredEncryptedNote,
 } from '@/lib/privacy';
+import { parseStealthMessageBody, type StealthClaimStatus, type StealthMetadata } from '@/lib/stealth';
 import {
   getTransactionHistoryForWallet,
   upsertTransactionHistory,
@@ -17,7 +18,7 @@ import { CallData, RpcProvider } from 'starknet';
 
 type LifecycleState = 'pending' | 'confirmed' | 'failed';
 type RequestStatus = 'pending' | 'paid' | 'expired' | 'rejected';
-type NotificationLifecycle = LifecycleState | RequestStatus;
+type NotificationLifecycle = LifecycleState | RequestStatus | StealthClaimStatus;
 type NotificationType =
   | 'incoming_transfer'
   | 'outgoing_pending'
@@ -30,7 +31,10 @@ type NotificationType =
   | 'payment_request_arrived'
   | 'payment_request_paid'
   | 'payment_request_rejected'
-  | 'payment_request_expired';
+  | 'payment_request_expired'
+  | 'stealth_payment_detected'
+  | 'stealth_claim_succeeded'
+  | 'stealth_claim_failed';
 
 interface RealtimeMessage {
   id: string;
@@ -41,6 +45,13 @@ interface RealtimeMessage {
   requestStatus?: RequestStatus;
   expiresAt?: number;
   paidTxHash?: string;
+  isStealth?: boolean;
+  stealthAddress?: string;
+  claimStatus?: StealthClaimStatus;
+  claimTxHash?: string;
+  stealthDeployTxHash?: string;
+  rawPlaintext?: string;
+  stealthMetadata?: StealthMetadata;
   from: string;
   to: string;
   counterparty: string;
@@ -283,6 +294,15 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
             status?: 'pending' | 'paid' | 'expired' | 'rejected';
             expiresAt?: number;
             paidTxHash?: string;
+            isStealth?: boolean;
+            stealthAddress?: string;
+            claimStatus?: StealthClaimStatus;
+            claimTxHash?: string;
+            stealthDeployTxHash?: string;
+            stealthSalt?: string;
+            stealthClassHash?: string;
+            stealthPublicKey?: string;
+            derivationTag?: string;
           };
         };
         if (!payload?.senderAddress || !payload?.recipientAddress) {
@@ -299,6 +319,26 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
         const amount = entry.amount ?? payload.meta?.amount;
         const expiresAt = entry.expiresAt ?? payload.meta?.expiresAt;
         const paidTxHash = entry.paidTxHash ?? payload.meta?.paidTxHash;
+        const parsedStealth = parseStealthMessageBody(plaintext);
+        const isStealth = entry.isStealth ?? payload.meta?.isStealth ?? Boolean(parsedStealth);
+        const stealthAddress =
+          entry.stealthAddress ?? payload.meta?.stealthAddress ?? parsedStealth?.stealth.stealthAddress;
+        const claimStatusRaw = entry.claimStatus ?? payload.meta?.claimStatus;
+        const claimStatus: StealthClaimStatus | undefined =
+          isStealth
+            ? claimStatusRaw === 'claimed' || claimStatusRaw === 'failed'
+              ? claimStatusRaw
+              : entry.txHash
+                ? 'claimable'
+                : 'pending'
+            : undefined;
+        const claimTxHash = entry.claimTxHash ?? payload.meta?.claimTxHash;
+        const stealthDeployTxHash = entry.stealthDeployTxHash ?? payload.meta?.stealthDeployTxHash;
+        const plaintextForDisplay = parsedStealth?.note?.trim()
+          ? parsedStealth.note
+          : isStealth
+            ? `Stealth payment: ${amount ?? parsedStealth?.amount ?? '0'} STRK`
+            : plaintext;
         const derivedRequestStatus: RequestStatus | undefined =
           requestKind === 'request'
             ? requestStatus === 'paid' || requestStatus === 'rejected'
@@ -317,13 +357,20 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
           requestStatus: derivedRequestStatus,
           expiresAt,
           paidTxHash,
+          isStealth,
+          stealthAddress,
+          claimStatus,
+          claimTxHash,
+          stealthDeployTxHash,
+          rawPlaintext: plaintext,
+          stealthMetadata: parsedStealth?.stealth,
           from: senderAddress,
           to: recipientAddress,
           counterparty,
           direction,
           isPaymentLinked: Boolean(entry.txHash),
           createdAt: entry.createdAt,
-          plaintext,
+          plaintext: plaintextForDisplay,
         } satisfies RealtimeMessage;
       } catch {
         const payload = entry.payload as StoredEncryptedNote['payload'] & {
@@ -355,6 +402,24 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
         const amount = entry.amount ?? (payload as { meta?: { amount?: string } }).meta?.amount;
         const expiresAt = entry.expiresAt ?? (payload as { meta?: { expiresAt?: number } }).meta?.expiresAt;
         const paidTxHash = entry.paidTxHash ?? (payload as { meta?: { paidTxHash?: string } }).meta?.paidTxHash;
+        const isStealth = entry.isStealth ?? (payload as { meta?: { isStealth?: boolean } }).meta?.isStealth;
+        const stealthAddress =
+          entry.stealthAddress ?? (payload as { meta?: { stealthAddress?: string } }).meta?.stealthAddress;
+        const claimStatusRaw =
+          entry.claimStatus ?? (payload as { meta?: { claimStatus?: StealthClaimStatus } }).meta?.claimStatus;
+        const claimStatus: StealthClaimStatus | undefined =
+          isStealth
+            ? claimStatusRaw === 'claimed' || claimStatusRaw === 'failed'
+              ? claimStatusRaw
+              : entry.txHash
+                ? 'claimable'
+                : 'pending'
+            : undefined;
+        const claimTxHash =
+          entry.claimTxHash ?? (payload as { meta?: { claimTxHash?: string } }).meta?.claimTxHash;
+        const stealthDeployTxHash =
+          entry.stealthDeployTxHash ??
+          (payload as { meta?: { stealthDeployTxHash?: string } }).meta?.stealthDeployTxHash;
         const derivedRequestStatus: RequestStatus | undefined =
           requestKind === 'request'
             ? requestStatus === 'paid' || requestStatus === 'rejected'
@@ -373,6 +438,11 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
           requestStatus: derivedRequestStatus,
           expiresAt,
           paidTxHash,
+          isStealth,
+          stealthAddress,
+          claimStatus,
+          claimTxHash,
+          stealthDeployTxHash,
           from: senderAddress,
           to: recipientAddress,
           counterparty: recipientAddress,
@@ -385,7 +455,7 @@ const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
     })
   );
 
-  return decrypted.filter((note): note is RealtimeMessage => note !== null);
+  return decrypted.filter(Boolean) as RealtimeMessage[];
 };
 
 const buildConversations = (messages: RealtimeMessage[]): ConversationThread[] => {
@@ -554,6 +624,20 @@ export const useRealtimeStore = create<RealtimeState>()(
                       },
                       timestamp: message.createdAt,
                     });
+                  } else if (message.isStealth) {
+                    nextNotifications = appendNotification(nextNotifications, {
+                      dedupeKey: `stealth-detected:${message.id}`,
+                      type: 'stealth_payment_detected',
+                      title: 'Stealth payment detected',
+                      description: `${message.amount ?? '0'} STRK ready to claim.`,
+                      txHash: message.txHash,
+                      metadata: {
+                        amount: message.amount,
+                        address: message.stealthAddress,
+                        lifecycle: message.claimStatus ?? 'claimable',
+                      },
+                      timestamp: message.createdAt,
+                    });
                   } else {
                     nextNotifications = appendNotification(nextNotifications, {
                       dedupeKey: `private-message:${message.id}`,
@@ -566,6 +650,36 @@ export const useRealtimeStore = create<RealtimeState>()(
                         address: message.from,
                       },
                       timestamp: message.createdAt,
+                    });
+                  }
+                }
+
+                if (message.isStealth && previous?.claimStatus && previous.claimStatus !== message.claimStatus) {
+                  if (message.claimStatus === 'claimed') {
+                    nextNotifications = appendNotification(nextNotifications, {
+                      dedupeKey: `stealth-claimed:${message.id}`,
+                      type: 'stealth_claim_succeeded',
+                      title: 'Stealth claim succeeded',
+                      description: `${message.amount ?? '0'} STRK moved to your main wallet.`,
+                      txHash: message.claimTxHash ?? message.txHash,
+                      metadata: {
+                        amount: message.amount,
+                        address: message.counterparty,
+                        lifecycle: 'claimed',
+                      },
+                    });
+                  } else if (message.claimStatus === 'failed') {
+                    nextNotifications = appendNotification(nextNotifications, {
+                      dedupeKey: `stealth-claim-failed:${message.id}`,
+                      type: 'stealth_claim_failed',
+                      title: 'Stealth claim failed',
+                      description: 'Retry claim after network confirmation.',
+                      txHash: message.txHash,
+                      metadata: {
+                        amount: message.amount,
+                        address: message.counterparty,
+                        lifecycle: 'failed',
+                      },
                     });
                   }
                 }

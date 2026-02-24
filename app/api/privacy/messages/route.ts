@@ -15,6 +15,15 @@ interface MessageBody {
   amount?: string;
   status?: 'pending' | 'paid' | 'expired' | 'rejected';
   expiresAt?: number;
+  isStealth?: boolean;
+  stealthAddress?: string;
+  claimStatus?: 'pending' | 'claimable' | 'claimed' | 'failed';
+  claimTxHash?: string;
+  stealthDeployTxHash?: string;
+  stealthSalt?: string;
+  stealthClassHash?: string;
+  stealthPublicKey?: string;
+  derivationTag?: string;
   payload?: unknown;
   createdAt?: number;
 }
@@ -62,6 +71,15 @@ export async function POST(request: Request) {
       status: body.status,
       expiresAt: body.expiresAt,
       paidTxHash: body.paidTxHash,
+      isStealth: body.isStealth,
+      stealthAddress: body.stealthAddress,
+      claimStatus: body.claimStatus,
+      claimTxHash: body.claimTxHash,
+      stealthDeployTxHash: body.stealthDeployTxHash,
+      stealthSalt: body.stealthSalt,
+      stealthClassHash: body.stealthClassHash,
+      stealthPublicKey: body.stealthPublicKey,
+      derivationTag: body.derivationTag,
       payload: body.payload,
       createdAt: typeof body.createdAt === 'number' ? body.createdAt : Date.now(),
     });
@@ -90,6 +108,9 @@ export async function PATCH(request: Request) {
         paidTxHash: body.paidTxHash,
         txHash: body.txHash,
         expiresAt: body.expiresAt,
+        claimStatus: body.claimStatus,
+        claimTxHash: body.claimTxHash,
+        stealthDeployTxHash: body.stealthDeployTxHash,
       }
     );
 

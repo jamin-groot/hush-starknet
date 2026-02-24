@@ -13,6 +13,15 @@ export interface EncryptedNotePayload {
     status?: 'pending' | 'paid' | 'expired' | 'rejected';
     expiresAt?: number;
     paidTxHash?: string;
+    isStealth?: boolean;
+    stealthAddress?: string;
+    claimStatus?: 'pending' | 'claimable' | 'claimed' | 'failed';
+    claimTxHash?: string;
+    stealthDeployTxHash?: string;
+    stealthSalt?: string;
+    stealthClassHash?: string;
+    stealthPublicKey?: string;
+    derivationTag?: string;
   };
 }
 
@@ -25,6 +34,15 @@ export interface StoredEncryptedNote {
   amount?: string;
   status?: 'pending' | 'paid' | 'expired' | 'rejected';
   expiresAt?: number;
+  isStealth?: boolean;
+  stealthAddress?: string;
+  claimStatus?: 'pending' | 'claimable' | 'claimed' | 'failed';
+  claimTxHash?: string;
+  stealthDeployTxHash?: string;
+  stealthSalt?: string;
+  stealthClassHash?: string;
+  stealthPublicKey?: string;
+  derivationTag?: string;
   payload: EncryptedNotePayload;
   createdAt: number;
 }
@@ -182,11 +200,16 @@ export async function encryptTransactionNote(
   recipientAddress: string,
   meta?: EncryptedNotePayload['meta']
 ): Promise<EncryptedNotePayload> {
+  const MAX_PLAIN_NOTE_LENGTH = 280;
+  const MAX_STRUCTURED_NOTE_LENGTH = 8192;
   const trimmed = note.trim();
   if (!trimmed) {
     throw new Error('Privacy mode requires a note to encrypt');
   }
-  if (trimmed.length > 280) {
+  // Stealth messages carry structured JSON metadata in the encrypted body, so they can
+  // legitimately exceed the short plain-note cap.
+  const maxLength = meta?.isStealth ? MAX_STRUCTURED_NOTE_LENGTH : MAX_PLAIN_NOTE_LENGTH;
+  if (trimmed.length > maxLength) {
     throw new Error('Invalid note format');
   }
 
@@ -299,11 +322,29 @@ export async function storeEncryptedChatMessage(record: {
   payload: EncryptedNotePayload;
   createdAt?: number;
   txHash?: string;
+  isStealth?: boolean;
+  stealthAddress?: string;
+  claimStatus?: 'pending' | 'claimable' | 'claimed' | 'failed';
+  claimTxHash?: string;
+  stealthDeployTxHash?: string;
+  stealthSalt?: string;
+  stealthClassHash?: string;
+  stealthPublicKey?: string;
+  derivationTag?: string;
 }): Promise<void> {
   await storeEncryptedNoteMetadata({
     id: `msg-${Date.now()}`,
     kind: record.txHash ? 'payment_note' : 'chat',
     txHash: record.txHash,
+    isStealth: record.isStealth,
+    stealthAddress: record.stealthAddress,
+    claimStatus: record.claimStatus,
+    claimTxHash: record.claimTxHash,
+    stealthDeployTxHash: record.stealthDeployTxHash,
+    stealthSalt: record.stealthSalt,
+    stealthClassHash: record.stealthClassHash,
+    stealthPublicKey: record.stealthPublicKey,
+    derivationTag: record.derivationTag,
     payload: record.payload,
     createdAt: record.createdAt ?? Date.now(),
   });
@@ -361,6 +402,25 @@ export async function updatePaymentRequestMessage(record: {
 
   if (!response.ok) {
     throw new Error('Failed to update payment request');
+  }
+}
+
+export async function updateStealthMessageStatus(record: {
+  id?: string;
+  requestId?: string;
+  claimStatus: 'pending' | 'claimable' | 'claimed' | 'failed';
+  claimTxHash?: string;
+  stealthDeployTxHash?: string;
+  txHash?: string;
+}): Promise<void> {
+  const response = await fetch('/api/privacy/messages', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(record),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to update stealth message');
   }
 }
 

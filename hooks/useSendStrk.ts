@@ -13,6 +13,7 @@ const RPC_ENDPOINTS = [
   'https://starknet-sepolia-rpc.publicnode.com',
   'https://rpc.starknet-testnet.lava.build:443',
 ] as const;
+const FEE_BUFFER_WEI = BigInt(5_000_000_000_000_000); // 0.005 STRK buffer for fees
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_ATTEMPTS = 20;
 
@@ -72,6 +73,9 @@ const isSuccessStatus = (status: unknown): boolean => {
   const finality = String(state.finality_status ?? '').toUpperCase();
   const execution = String(state.execution_status ?? '').toUpperCase();
   const txStatus = String(state.tx_status ?? '').toUpperCase();
+  if (execution.includes('REVERTED') || execution.includes('REJECTED')) {
+    return false;
+  }
 
   return (
     finality.includes('ACCEPTED_ON_L2') ||
@@ -107,12 +111,11 @@ const resolveTransaction = async (transactionHash: string): Promise<void> => {
         const provider = new RpcProvider({ nodeUrl });
         const status = await provider.getTransactionStatus(transactionHash);
 
-        if (isSuccessStatus(status)) {
-          return;
-        }
-
         if (isFailureStatus(status)) {
           throw new Error(`Transaction failed with status: ${JSON.stringify(status)}`);
+        }
+        if (isSuccessStatus(status)) {
+          return;
         }
       } catch (error) {
         if (error instanceof Error && /rejected|reverted|failed/i.test(error.message)) {
@@ -183,6 +186,9 @@ export function useSendStrk() {
     const availableWei = toWei(availableBalance);
     if (amountWei > availableWei) {
       throw new Error('Insufficient balance');
+    }
+    if (amountWei + FEE_BUFFER_WEI > availableWei) {
+      throw new Error('Insufficient balance to cover amount + network fee');
     }
 
     const optimisticHash = `pending-${Date.now()}`;
