@@ -10,7 +10,7 @@ import { ensureEncryptionIdentity } from '@/lib/privacy';
 import { NotificationBell } from '@/components/notification-bell';
 
 export function WalletHeader() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, account } = useAccount();
   const setWallet = useWalletStore((s) => s.setWallet);
 
   const { connectAsync, connectors, pendingConnector, isPending } = useConnect();
@@ -21,11 +21,14 @@ export function WalletHeader() {
   useEffect(() => {
     if (isConnected && address) {
       setWallet(address);
-      ensureEncryptionIdentity(address).catch((error) => {
+      ensureEncryptionIdentity(
+        address,
+        account as unknown as { signMessage: (typedData: unknown) => Promise<unknown> }
+      ).catch((error) => {
         console.error('Failed to initialize privacy keys:', error);
       });
     }
-  }, [isConnected, address, setWallet]);
+  }, [isConnected, address, account, setWallet]);
 
   const preferredConnector = useMemo(() => {
     return (

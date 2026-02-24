@@ -1,5 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { getSupabaseServerClient } from '@/lib/supabase-server';
 
 export interface StoredEncryptedMessage {
   id: string;
@@ -23,66 +22,107 @@ export interface StoredEncryptedMessage {
   createdAt: number;
 }
 
-interface PrivacyStoreData {
-  keys: Record<string, unknown>;
-  messages: StoredEncryptedMessage[];
-}
-
-const DATA_DIR = path.join(process.cwd(), 'data');
-const STORE_PATH = path.join(DATA_DIR, 'privacy-store.json');
-
 const normalizeAddress = (value: string): string => value.trim().toLowerCase();
 const generateMessageId = (): string =>
   `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-const defaultStore = (): PrivacyStoreData => ({
-  keys: {},
-  messages: [],
-});
-
-async function readStore(): Promise<PrivacyStoreData> {
-  try {
-    const raw = await readFile(STORE_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as Partial<PrivacyStoreData>;
-    return {
-      keys: parsed.keys ?? {},
-      messages: parsed.messages ?? [],
-    };
-  } catch {
-    return defaultStore();
+export async function upsertPublicKey(address: string, publicKeyJwk: unknown): Promise<void> {
+  const supabase = getSupabaseServerClient();
+  const { error } = await supabase
+    .from('privacy_public_keys')
+    .upsert(
+      {
+        address: normalizeAddress(address),
+        public_key_jwk: publicKeyJwk,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'address' }
+    );
+  if (error) {
+    throw new Error(`Failed to upsert public key: ${error.message}`);
   }
 }
 
-async function writeStore(store: PrivacyStoreData): Promise<void> {
-  await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(STORE_PATH, JSON.stringify(store, null, 2), 'utf8');
-}
-
-export async function upsertPublicKey(address: string, publicKeyJwk: unknown): Promise<void> {
-  const store = await readStore();
-  store.keys[normalizeAddress(address)] = publicKeyJwk;
-  await writeStore(store);
-}
-
 export async function getPublicKey(address: string): Promise<unknown | null> {
-  const store = await readStore();
-  return store.keys[normalizeAddress(address)] ?? null;
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase
+    .from('privacy_public_keys')
+    .select('public_key_jwk')
+    .eq('address', normalizeAddress(address))
+    .maybeSingle();
+  if (error) {
+    throw new Error(`Failed to fetch public key: ${error.message}`);
+  }
+  return data?.public_key_jwk ?? null;
 }
 
 export async function saveEncryptedMessage(message: StoredEncryptedMessage): Promise<void> {
-  const store = await readStore();
   const normalized: StoredEncryptedMessage = {
     ...message,
     id: message.id || generateMessageId(),
     kind: message.kind ?? 'payment_note',
   };
+  const payload =
+    normalized.payload && typeof normalized.payload === 'object'
+      ? (normalized.payload as Record<string, unknown>)
+      : {};
+  const senderAddress =
+    typeof payload.senderAddress === 'string' ? normalizeAddress(payload.senderAddress) : null;
+  const recipientAddress =
+    typeof payload.recipientAddress === 'string' ? normalizeAddress(payload.recipientAddress) : null;
 
-  const next = normalized.txHash
-    ? store.messages.filter((item) => item.txHash !== normalized.txHash)
-    : store.messages;
-  next.unshift(normalized);
-  store.messages = next.slice(0, 1000);
-  await writeStore(store);
+  const supabase = getSupabaseServerClient();
+  let existingId: string | null = null;
+  if (normalized.txHash) {
+    const { data: existingByHash, error: hashLookupError } = await supabase
+      .from('encrypted_messages')
+      .select('id')
+      .eq('tx_hash', normalized.txHash)
+      .limit(1)
+      .maybeSingle();
+    if (hashLookupError) {
+      throw new Error(`Failed to check existing txHash: ${hashLookupError.message}`);
+    }
+    existingId = existingByHash?.id ?? null;
+  }
+
+  const upsertPayload = {
+    id: existingId ?? normalized.id,
+    tx_hash: normalized.txHash ?? null,
+    kind: normalized.kind ?? null,
+    request_id: normalized.requestId ?? null,
+    paid_tx_hash: normalized.paidTxHash ?? null,
+    amount: normalized.amount ?? null,
+    status: normalized.status ?? null,
+    expires_at: normalized.expiresAt ?? null,
+    is_stealth: normalized.isStealth ?? false,
+    stealth_address: normalized.stealthAddress ?? null,
+    claim_status: normalized.claimStatus ?? null,
+    claim_tx_hash: normalized.claimTxHash ?? null,
+    stealth_deploy_tx_hash: normalized.stealthDeployTxHash ?? null,
+    stealth_salt: normalized.stealthSalt ?? null,
+    stealth_class_hash: normalized.stealthClassHash ?? null,
+    stealth_public_key: normalized.stealthPublicKey ?? null,
+    derivation_tag: normalized.derivationTag ?? null,
+    payload_json: normalized.payload,
+    sender_address: senderAddress,
+    recipient_address: recipientAddress,
+    ephemeral_pubkey: normalized.stealthPublicKey ?? null,
+    metadata_json: {
+      kind: normalized.kind ?? null,
+      requestId: normalized.requestId ?? null,
+      txHash: normalized.txHash ?? null,
+    },
+    created_at: new Date(normalized.createdAt).toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase.from('encrypted_messages').upsert(upsertPayload, {
+    onConflict: 'id',
+  });
+  if (error) {
+    throw new Error(`Failed to persist encrypted message: ${error.message}`);
+  }
 }
 
 export async function updateEncryptedMessage(
@@ -103,61 +143,60 @@ export async function updateEncryptedMessage(
   if (!match.id && !match.requestId) {
     return null;
   }
-
-  const store = await readStore();
-  const index = store.messages.findIndex((item) => {
-    if (match.id && item.id === match.id) {
-      return true;
-    }
-    if (match.requestId && item.requestId === match.requestId) {
-      return true;
-    }
-    return false;
-  });
-
-  if (index < 0) {
+  const supabase = getSupabaseServerClient();
+  const query = supabase.from('encrypted_messages').select('*').limit(1);
+  if (match.id) {
+    query.eq('id', match.id);
+  } else if (match.requestId) {
+    query.eq('request_id', match.requestId);
+  }
+  const { data: current, error: fetchError } = await query.maybeSingle();
+  if (fetchError) {
+    throw new Error(`Failed to fetch message for update: ${fetchError.message}`);
+  }
+  if (!current) {
     return null;
   }
 
-  const current = store.messages[index];
-  const next: StoredEncryptedMessage = { ...current };
-  if (updates.status !== undefined) {
-    next.status = updates.status;
+  const updatePayload = {
+    status: updates.status,
+    paid_tx_hash: updates.paidTxHash,
+    tx_hash: updates.txHash,
+    expires_at: updates.expiresAt,
+    claim_status: updates.claimStatus,
+    claim_tx_hash: updates.claimTxHash,
+    stealth_deploy_tx_hash: updates.stealthDeployTxHash,
+    updated_at: new Date().toISOString(),
+  };
+
+  const updateQuery = supabase.from('encrypted_messages').update(updatePayload).select('*').limit(1);
+  if (match.id) {
+    updateQuery.eq('id', match.id);
+  } else if (match.requestId) {
+    updateQuery.eq('request_id', match.requestId);
   }
-  if (updates.paidTxHash !== undefined) {
-    next.paidTxHash = updates.paidTxHash;
+  const { data: updated, error: updateError } = await updateQuery.maybeSingle();
+  if (updateError) {
+    throw new Error(`Failed to update encrypted message: ${updateError.message}`);
   }
-  if (updates.txHash !== undefined) {
-    next.txHash = updates.txHash;
+  if (!updated) {
+    return null;
   }
-  if (updates.expiresAt !== undefined) {
-    next.expiresAt = updates.expiresAt;
-  }
-  if (updates.claimStatus !== undefined) {
-    next.claimStatus = updates.claimStatus;
-  }
-  if (updates.claimTxHash !== undefined) {
-    next.claimTxHash = updates.claimTxHash;
-  }
-  if (updates.stealthDeployTxHash !== undefined) {
-    next.stealthDeployTxHash = updates.stealthDeployTxHash;
-  }
-  store.messages[index] = next;
-  await writeStore(store);
-  return next;
+  return mapRowToMessage(updated);
 }
 
 export async function getMessagesForRecipient(recipientAddress: string): Promise<StoredEncryptedMessage[]> {
-  const normalized = normalizeAddress(recipientAddress);
-  const store = await readStore();
-
-  return store.messages.filter((item) => {
-    if (!item.payload || typeof item.payload !== 'object') {
-      return false;
+  const out: StoredEncryptedMessage[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await getMessagesForRecipientPage(recipientAddress, { cursor, limit: 200 });
+    out.push(...page.messages);
+    if (!page.nextCursor) {
+      break;
     }
-    const payload = item.payload as Record<string, unknown>;
-    return typeof payload.recipientAddress === 'string' && normalizeAddress(payload.recipientAddress) === normalized;
-  });
+    cursor = page.nextCursor;
+  }
+  return out;
 }
 
 interface WalletMessageFilters {
@@ -168,25 +207,173 @@ export async function getMessagesForWallet(
   walletAddress: string,
   filters?: WalletMessageFilters
 ): Promise<StoredEncryptedMessage[]> {
+  const out: StoredEncryptedMessage[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await getMessagesForWalletPage(walletAddress, {
+      ...(filters ?? {}),
+      cursor,
+      limit: 200,
+    });
+    out.push(...page.messages);
+    if (!page.nextCursor) {
+      break;
+    }
+    cursor = page.nextCursor;
+  }
+  return out;
+}
+
+interface PaginationOptions {
+  cursor?: string;
+  limit?: number;
+}
+
+interface WalletMessagePage {
+  messages: StoredEncryptedMessage[];
+  nextCursor: string | null;
+}
+
+const mapRowToMessage = (row: Record<string, unknown>): StoredEncryptedMessage => ({
+  id: String(row.id),
+  txHash: (row.tx_hash as string | null) ?? undefined,
+  kind: (row.kind as StoredEncryptedMessage['kind'] | null) ?? undefined,
+  requestId: (row.request_id as string | null) ?? undefined,
+  paidTxHash: (row.paid_tx_hash as string | null) ?? undefined,
+  amount: (row.amount as string | null) ?? undefined,
+  status: (row.status as StoredEncryptedMessage['status'] | null) ?? undefined,
+  expiresAt: (row.expires_at as number | null) ?? undefined,
+  isStealth: (row.is_stealth as boolean | null) ?? undefined,
+  stealthAddress: (row.stealth_address as string | null) ?? undefined,
+  claimStatus: (row.claim_status as StoredEncryptedMessage['claimStatus'] | null) ?? undefined,
+  claimTxHash: (row.claim_tx_hash as string | null) ?? undefined,
+  stealthDeployTxHash: (row.stealth_deploy_tx_hash as string | null) ?? undefined,
+  stealthSalt: (row.stealth_salt as string | null) ?? undefined,
+  stealthClassHash: (row.stealth_class_hash as string | null) ?? undefined,
+  stealthPublicKey: (row.stealth_public_key as string | null) ?? undefined,
+  derivationTag: (row.derivation_tag as string | null) ?? undefined,
+  payload: row.payload_json,
+  createdAt: new Date(String(row.created_at)).getTime(),
+});
+
+const applyPagination = (
+  query: {
+    lt: (field: string, value: string) => unknown;
+    order: (field: string, options: { ascending: boolean }) => unknown;
+    limit: (value: number) => unknown;
+  },
+  cursor: string | undefined,
+  limit: number
+) => {
+  if (cursor) {
+    query.lt('created_at', cursor);
+  }
+  query.order('created_at', { ascending: false }).limit(limit + 1);
+};
+
+export async function getMessagesForRecipientPage(
+  recipientAddress: string,
+  options: PaginationOptions
+): Promise<WalletMessagePage> {
+  const normalized = normalizeAddress(recipientAddress);
+  const supabase = getSupabaseServerClient();
+  const limit = Math.min(Math.max(options.limit ?? 100, 1), 200);
+  const query = supabase
+    .from('encrypted_messages')
+    .select('*')
+    .eq('recipient_address', normalized);
+  applyPagination(query, options.cursor, limit);
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(`Failed to fetch recipient messages: ${error.message}`);
+  }
+  const rows = (data ?? []) as Record<string, unknown>[];
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore ? String(pageRows[pageRows.length - 1]?.created_at ?? '') : null;
+  return {
+    messages: pageRows.map(mapRowToMessage),
+    nextCursor: nextCursor || null,
+  };
+}
+
+export async function getMessagesForWalletPage(
+  walletAddress: string,
+  filters?: WalletMessageFilters & PaginationOptions
+): Promise<WalletMessagePage> {
   const normalized = normalizeAddress(walletAddress);
   const includeSent = filters?.includeSent ?? false;
-  const store = await readStore();
+  const supabase = getSupabaseServerClient();
+  const limit = Math.min(Math.max(filters?.limit ?? 100, 1), 200);
+  let query = supabase.from('encrypted_messages').select('*');
+  if (includeSent) {
+    query = query.or(`recipient_address.eq.${normalized},sender_address.eq.${normalized}`);
+  } else {
+    query = query.eq('recipient_address', normalized);
+  }
+  applyPagination(query, filters?.cursor, limit);
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(`Failed to fetch wallet messages: ${error.message}`);
+  }
+  const rows = (data ?? []) as Record<string, unknown>[];
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore ? String(pageRows[pageRows.length - 1]?.created_at ?? '') : null;
+  return {
+    messages: pageRows.map(mapRowToMessage),
+    nextCursor: nextCursor || null,
+  };
+}
 
-  return store.messages.filter((item) => {
-    if (!item.payload || typeof item.payload !== 'object') {
-      return false;
-    }
-    const payload = item.payload as Record<string, unknown>;
-    const recipient =
-      typeof payload.recipientAddress === 'string' ? normalizeAddress(payload.recipientAddress) : null;
-    const sender = typeof payload.senderAddress === 'string' ? normalizeAddress(payload.senderAddress) : null;
+export async function upsertEncryptedIdentityBackup(record: {
+  walletAddress: string;
+  encryptedBlob: string;
+  nonce: string;
+  algorithm: string;
+  version: number;
+}): Promise<void> {
+  const supabase = getSupabaseServerClient();
+  const { error } = await supabase
+    .from('encrypted_identities')
+    .upsert(
+      {
+        wallet_address: normalizeAddress(record.walletAddress),
+        encrypted_blob: record.encryptedBlob,
+        nonce: record.nonce,
+        algorithm: record.algorithm,
+        version: record.version,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'wallet_address' }
+    );
+  if (error) {
+    throw new Error(`Failed to upsert encrypted identity: ${error.message}`);
+  }
+}
 
-    if (recipient === normalized) {
-      return true;
-    }
-    if (includeSent && sender === normalized) {
-      return true;
-    }
-    return false;
-  });
+export async function getEncryptedIdentityBackup(walletAddress: string): Promise<{
+  encryptedBlob: string;
+  nonce: string;
+  algorithm: string;
+  version: number;
+} | null> {
+  const supabase = getSupabaseServerClient();
+  const { data, error } = await supabase
+    .from('encrypted_identities')
+    .select('encrypted_blob, nonce, algorithm, version')
+    .eq('wallet_address', normalizeAddress(walletAddress))
+    .maybeSingle();
+  if (error) {
+    throw new Error(`Failed to fetch encrypted identity: ${error.message}`);
+  }
+  if (!data) {
+    return null;
+  }
+  return {
+    encryptedBlob: String(data.encrypted_blob),
+    nonce: String(data.nonce),
+    algorithm: String(data.algorithm),
+    version: Number(data.version),
+  };
 }

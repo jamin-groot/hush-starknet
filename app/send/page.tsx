@@ -72,8 +72,8 @@ export default function SendPage() {
           throw new Error('Wallet not connected');
         }
 
-        await ensureEncryptionIdentity(senderAddress);
-        const encrypted = await encryptTransactionNote(note, senderAddress, recipient);
+        await ensureEncryptionIdentity(senderAddress, account);
+        const encrypted = await encryptTransactionNote(note, senderAddress, recipient, undefined, account);
         encryptedPayload = JSON.stringify(encrypted);
         setIsEncrypting(false);
       } else if (isPrivate && !note.trim()) {

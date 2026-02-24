@@ -52,8 +52,15 @@ interface LocalKeyRecord {
   privateKeyJwk: JsonWebKey;
 }
 
+interface SignableAccount {
+  signMessage: (typedData: unknown) => Promise<unknown>;
+}
+
 const LOCAL_KEYS_STORAGE = 'hush.encryptionKeys.v2';
 const LOCAL_OUTGOING_PREVIEWS_STORAGE = 'hush.outgoingMessagePreviews.v1';
+const LOCAL_SESSION_CACHE_STORAGE = 'hush.privacySession.v1';
+const IDENTITY_BACKUP_ALGORITHM = 'AES-GCM-256';
+const IDENTITY_BACKUP_VERSION = 1;
 
 const normalizeAddress = (value: string): string => value.trim().toLowerCase();
 
@@ -129,6 +136,85 @@ const writeOutgoingPreviewMap = (value: Record<string, OutgoingMessagePreview>):
   window.localStorage.setItem(LOCAL_OUTGOING_PREVIEWS_STORAGE, JSON.stringify(value));
 };
 
+const readSessionCache = (): Record<string, number> => {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(LOCAL_SESSION_CACHE_STORAGE);
+    if (!raw) {
+      return {};
+    }
+    return (JSON.parse(raw) as Record<string, number>) ?? {};
+  } catch {
+    return {};
+  }
+};
+
+const writeSessionCache = (value: Record<string, number>): void => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.localStorage.setItem(LOCAL_SESSION_CACHE_STORAGE, JSON.stringify(value));
+};
+
+const buildRecoveryTypedData = (address: string) => ({
+  types: {
+    StarknetDomain: [
+      { name: 'name', type: 'shortstring' },
+      { name: 'version', type: 'shortstring' },
+      { name: 'chainId', type: 'shortstring' },
+    ],
+    WalletRecovery: [
+      { name: 'wallet', type: 'ContractAddress' },
+      { name: 'purpose', type: 'shortstring' },
+    ],
+  },
+  primaryType: 'WalletRecovery',
+  domain: {
+    name: 'HushIdentityRecovery',
+    version: '1',
+    chainId: 'SN_SEPOLIA',
+  },
+  message: {
+    wallet: normalizeAddress(address),
+    purpose: 'hush_identity_backup_v1',
+  },
+});
+
+const deriveBackupKey = async (account: SignableAccount, address: string): Promise<CryptoKey> => {
+  const signature = await account.signMessage(buildRecoveryTypedData(address));
+  const serialized = typeof signature === 'string' ? signature : JSON.stringify(signature);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(serialized));
+  return await crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+};
+
+const encryptIdentityBackup = async (
+  record: LocalKeyRecord,
+  backupKey: CryptoKey
+): Promise<{ encryptedBlob: string; nonce: string }> => {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    backupKey,
+    new TextEncoder().encode(JSON.stringify(record))
+  );
+  return { encryptedBlob: toBase64(ciphertext), nonce: toBase64(iv.buffer) };
+};
+
+const decryptIdentityBackup = async (
+  encryptedBlob: string,
+  nonce: string,
+  backupKey: CryptoKey
+): Promise<LocalKeyRecord> => {
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: new Uint8Array(fromBase64(nonce)) },
+    backupKey,
+    fromBase64(encryptedBlob)
+  );
+  return JSON.parse(new TextDecoder().decode(decrypted)) as LocalKeyRecord;
+};
+
 async function registerPublicKey(address: string, publicKeyJwk: JsonWebKey): Promise<void> {
   const response = await fetch('/api/privacy/register-key', {
     method: 'POST',
@@ -139,6 +225,52 @@ async function registerPublicKey(address: string, publicKeyJwk: JsonWebKey): Pro
   if (!response.ok) {
     throw new Error('Failed to register encryption key');
   }
+}
+
+export async function ensurePrivacySession(
+  account: SignableAccount | null | undefined,
+  address: string
+): Promise<void> {
+  if (!account || !address) {
+    return;
+  }
+  const normalized = normalizeAddress(address);
+  const cache = readSessionCache();
+  const now = Date.now();
+  const cachedUntil = cache[normalized] ?? 0;
+  if (cachedUntil > now) {
+    return;
+  }
+
+  const challengeResponse = await fetch('/api/auth/challenge', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ walletAddress: normalized }),
+  });
+  if (!challengeResponse.ok) {
+    throw new Error('Failed to start wallet auth session');
+  }
+  const challenge = (await challengeResponse.json()) as { challengeToken?: string; typedData?: Record<string, unknown> };
+  if (!challenge.challengeToken || !challenge.typedData) {
+    throw new Error('Invalid auth challenge response');
+  }
+
+  const signature = await account.signMessage(challenge.typedData);
+  const verifyResponse = await fetch('/api/auth/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      challengeToken: challenge.challengeToken,
+      walletAddress: normalized,
+      signature,
+    }),
+  });
+  if (!verifyResponse.ok) {
+    throw new Error('Failed to verify wallet auth session');
+  }
+
+  cache[normalized] = now + 10 * 60 * 1000;
+  writeSessionCache(cache);
 }
 
 async function fetchPublicKeyForAddress(address: string): Promise<JsonWebKey> {
@@ -155,14 +287,59 @@ async function fetchPublicKeyForAddress(address: string): Promise<JsonWebKey> {
   return data.publicKeyJwk;
 }
 
-export async function ensureEncryptionIdentity(address: string): Promise<void> {
+export async function ensureEncryptionIdentity(
+  address: string,
+  account?: SignableAccount | null
+): Promise<void> {
   const normalized = normalizeAddress(address);
+  await ensurePrivacySession(account, normalized);
   const map = readLocalKeyMap();
   const existing = map[normalized];
 
   if (existing?.publicKeyJwk && existing?.privateKeyJwk) {
     await registerPublicKey(normalized, existing.publicKeyJwk);
+    if (account) {
+      const backupKey = await deriveBackupKey(account, normalized);
+      const encrypted = await encryptIdentityBackup(existing, backupKey);
+      await fetch('/api/privacy/identity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          walletAddress: normalized,
+          encryptedBlob: encrypted.encryptedBlob,
+          nonce: encrypted.nonce,
+          algorithm: IDENTITY_BACKUP_ALGORITHM,
+          version: IDENTITY_BACKUP_VERSION,
+        }),
+      });
+    }
     return;
+  }
+
+  if (account) {
+    const backupResponse = await fetch('/api/privacy/identity');
+    if (backupResponse.ok) {
+      const backupData = (await backupResponse.json()) as {
+        backup?: {
+          encryptedBlob: string;
+          nonce: string;
+          algorithm: string;
+          version: number;
+        } | null;
+      };
+      if (backupData.backup?.encryptedBlob && backupData.backup.nonce) {
+        const backupKey = await deriveBackupKey(account, normalized);
+        const recovered = await decryptIdentityBackup(
+          backupData.backup.encryptedBlob,
+          backupData.backup.nonce,
+          backupKey
+        );
+        map[normalized] = recovered;
+        writeLocalKeyMap(map);
+        await registerPublicKey(normalized, recovered.publicKeyJwk);
+        return;
+      }
+    }
   }
 
   const pair = await crypto.subtle.generateKey(
@@ -182,6 +359,21 @@ export async function ensureEncryptionIdentity(address: string): Promise<void> {
   map[normalized] = { publicKeyJwk, privateKeyJwk };
   writeLocalKeyMap(map);
   await registerPublicKey(normalized, publicKeyJwk);
+  if (account) {
+    const backupKey = await deriveBackupKey(account, normalized);
+    const encrypted = await encryptIdentityBackup({ publicKeyJwk, privateKeyJwk }, backupKey);
+    await fetch('/api/privacy/identity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        walletAddress: normalized,
+        encryptedBlob: encrypted.encryptedBlob,
+        nonce: encrypted.nonce,
+        algorithm: IDENTITY_BACKUP_ALGORITHM,
+        version: IDENTITY_BACKUP_VERSION,
+      }),
+    });
+  }
 }
 
 const getPrivateKeyJwk = (address: string): JsonWebKey => {
@@ -198,7 +390,8 @@ export async function encryptTransactionNote(
   note: string,
   senderAddress: string,
   recipientAddress: string,
-  meta?: EncryptedNotePayload['meta']
+  meta?: EncryptedNotePayload['meta'],
+  account?: SignableAccount | null
 ): Promise<EncryptedNotePayload> {
   const MAX_PLAIN_NOTE_LENGTH = 280;
   const MAX_STRUCTURED_NOTE_LENGTH = 8192;
@@ -216,7 +409,7 @@ export async function encryptTransactionNote(
   const normalizedSender = normalizeAddress(senderAddress);
   const normalizedRecipient = normalizeAddress(recipientAddress);
 
-  await ensureEncryptionIdentity(normalizedSender);
+  await ensureEncryptionIdentity(normalizedSender, account);
   const recipientPublicJwk = await fetchPublicKeyForAddress(normalizedRecipient);
 
   const recipientPublicKey = await crypto.subtle.importKey(
@@ -295,27 +488,52 @@ export async function storeEncryptedNoteMetadata(record: StoredEncryptedNote): P
 }
 
 export async function getEncryptedNotesForRecipient(recipientAddress: string): Promise<StoredEncryptedNote[]> {
-  const response = await fetch(`/api/privacy/messages?recipient=${encodeURIComponent(normalizeAddress(recipientAddress))}`);
-  if (!response.ok) {
-    throw new Error('Failed to load encrypted notes');
-  }
-  const data = (await response.json()) as { messages?: StoredEncryptedNote[] };
-  return data.messages ?? [];
+  const normalized = normalizeAddress(recipientAddress);
+  const all: StoredEncryptedNote[] = [];
+  let cursor: string | null = null;
+  do {
+    const query = new URLSearchParams({
+      recipient: normalized,
+      limit: '200',
+    });
+    if (cursor) {
+      query.set('cursor', cursor);
+    }
+    const response = await fetch(`/api/privacy/messages?${query.toString()}`);
+    if (!response.ok) {
+      throw new Error('Failed to load encrypted notes');
+    }
+    const data = (await response.json()) as { messages?: StoredEncryptedNote[]; nextCursor?: string | null };
+    all.push(...(data.messages ?? []));
+    cursor = data.nextCursor ?? null;
+  } while (cursor);
+  return all;
 }
 
 export async function getEncryptedMessagesForWallet(
   walletAddress: string
 ): Promise<StoredEncryptedNote[]> {
-  const response = await fetch(
-    `/api/privacy/messages?recipient=${encodeURIComponent(normalizeAddress(walletAddress))}&includeSent=true`
-  );
-
-  if (!response.ok) {
-    throw new Error('Failed to load encrypted messages');
-  }
-
-  const data = (await response.json()) as { messages?: StoredEncryptedNote[] };
-  return data.messages ?? [];
+  const normalized = normalizeAddress(walletAddress);
+  const all: StoredEncryptedNote[] = [];
+  let cursor: string | null = null;
+  do {
+    const query = new URLSearchParams({
+      recipient: normalized,
+      includeSent: 'true',
+      limit: '200',
+    });
+    if (cursor) {
+      query.set('cursor', cursor);
+    }
+    const response = await fetch(`/api/privacy/messages?${query.toString()}`);
+    if (!response.ok) {
+      throw new Error('Failed to load encrypted messages');
+    }
+    const data = (await response.json()) as { messages?: StoredEncryptedNote[]; nextCursor?: string | null };
+    all.push(...(data.messages ?? []));
+    cursor = data.nextCursor ?? null;
+  } while (cursor);
+  return all;
 }
 
 export async function storeEncryptedChatMessage(record: {

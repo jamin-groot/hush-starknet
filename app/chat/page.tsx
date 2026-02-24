@@ -287,7 +287,7 @@ export default function ChatPage() {
     const generatedRequestId = `req-${now}-${Math.random().toString(36).slice(2, 8)}`;
 
     try {
-      await ensureEncryptionIdentity(address);
+      await ensureEncryptionIdentity(address, account);
       const contentToEncrypt =
         messageText.trim() ||
         (composeMode === 'request'
@@ -328,7 +328,8 @@ export default function ChatPage() {
                 stealthPublicKey: stealthMeta.stealthPublicKey,
                 derivationTag: stealthMeta.derivationTag,
               }
-          : undefined
+          : undefined,
+        account
       );
       const outgoingPreview = stealthMeta
         ? `Stealth payment: ${amount} STRK${messageText.trim() ? ` - ${messageText.trim()}` : ''}`

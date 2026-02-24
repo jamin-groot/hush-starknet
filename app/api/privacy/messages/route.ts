@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server';
 import {
-  getMessagesForRecipient,
-  getMessagesForWallet,
+  getMessagesForWalletPage,
+  getMessagesForRecipientPage,
   saveEncryptedMessage,
   updateEncryptedMessage,
 } from '@/lib/privacy-store';
+import { getWalletSessionFromRequest } from '@/lib/auth-session';
+import { checkRateLimit } from '@/lib/rate-limit';
 
 interface MessageBody {
   id?: string;
@@ -30,18 +32,27 @@ interface MessageBody {
 
 export async function GET(request: Request) {
   try {
+    const session = await getWalletSessionFromRequest(request);
+    if (!session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const { searchParams } = new URL(request.url);
     const recipient = searchParams.get('recipient')?.trim().toLowerCase();
     const includeSent = searchParams.get('includeSent') === 'true';
+    const cursor = searchParams.get('cursor') ?? undefined;
+    const limit = searchParams.get('limit') ? Number(searchParams.get('limit')) : undefined;
 
     if (!recipient) {
       return NextResponse.json({ error: 'recipient is required' }, { status: 400 });
     }
+    if (recipient !== session.walletAddress) {
+      return NextResponse.json({ error: 'Recipient does not match authenticated wallet' }, { status: 403 });
+    }
 
-    const messages = includeSent
-      ? await getMessagesForWallet(recipient, { includeSent: true })
-      : await getMessagesForRecipient(recipient);
-    return NextResponse.json({ messages });
+    const page = includeSent
+      ? await getMessagesForWalletPage(recipient, { includeSent: true, cursor, limit })
+      : await getMessagesForRecipientPage(recipient, { cursor, limit });
+    return NextResponse.json({ messages: page.messages, nextCursor: page.nextCursor });
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to load messages', details: error instanceof Error ? error.message : 'Unknown error' },
@@ -52,6 +63,17 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const rate = checkRateLimit(request, 'privacy:messages:post', 30, 60_000);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: 'Too many requests' },
+        { status: 429, headers: { 'Retry-After': String(rate.retryAfterSeconds) } }
+      );
+    }
+    const session = await getWalletSessionFromRequest(request);
+    if (!session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const body = (await request.json()) as MessageBody;
     const payloadMeta =
       body.payload && typeof body.payload === 'object'
@@ -60,6 +82,13 @@ export async function POST(request: Request) {
 
     if (!body.payload) {
       return NextResponse.json({ error: 'payload is required' }, { status: 400 });
+    }
+    const senderAddress =
+      body.payload && typeof body.payload === 'object'
+        ? (body.payload as { senderAddress?: string }).senderAddress?.trim().toLowerCase()
+        : null;
+    if (!senderAddress || senderAddress !== session.walletAddress) {
+      return NextResponse.json({ error: 'Sender does not match authenticated wallet' }, { status: 403 });
     }
 
     await saveEncryptedMessage({
@@ -95,6 +124,17 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    const rate = checkRateLimit(request, 'privacy:messages:patch', 60, 60_000);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: 'Too many requests' },
+        { status: 429, headers: { 'Retry-After': String(rate.retryAfterSeconds) } }
+      );
+    }
+    const session = await getWalletSessionFromRequest(request);
+    if (!session) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const body = (await request.json()) as MessageBody;
 
     if (!body.id && !body.requestId) {
