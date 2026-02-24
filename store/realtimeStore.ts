@@ -14,7 +14,8 @@ import {
   getTransactionHistoryForWallet,
   upsertTransactionHistory,
 } from '@/lib/transaction-history';
-import { CallData, RpcProvider } from 'starknet';
+import { CallData } from 'starknet';
+import { buildRpcProviders } from '@/lib/rpc-router';
 
 type LifecycleState = 'pending' | 'confirmed' | 'failed';
 type RequestStatus = 'pending' | 'paid' | 'expired' | 'rejected';
@@ -119,10 +120,6 @@ const STRK_ADDRESS =
   '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
 const STRK_DECIMALS = 18;
 const STARKNET_SEPOLIA_CHAIN_ID = '0x534e5f5345504f4c4941';
-const RPC_ENDPOINTS = [
-  'https://starknet-sepolia-rpc.publicnode.com',
-  'https://rpc.starknet-testnet.lava.build:443',
-] as const;
 const POLL_INTERVAL_MS = 12000;
 const MAX_NOTIFICATIONS = 100;
 
@@ -281,7 +278,12 @@ const mergeHistoryWithMessages = (
 };
 
 const loadMessages = async (address: string): Promise<RealtimeMessage[]> => {
-  const encryptedNotes = await getEncryptedMessagesForWallet(address);
+  let encryptedNotes: StoredEncryptedNote[] = [];
+  try {
+    encryptedNotes = await getEncryptedMessagesForWallet(address);
+  } catch {
+    return [];
+  }
 
   const decrypted = await Promise.all(
     encryptedNotes.map(async (entry) => {
@@ -496,7 +498,7 @@ const performRefresh = async (address: string, account?: unknown) => {
     const mergedTransactions = mergeHistoryWithMessages(normalized, history, messages);
 
     let balance = '0.0000';
-    const callers: ContractCaller[] = RPC_ENDPOINTS.map((nodeUrl) => new RpcProvider({ nodeUrl }));
+    const callers: ContractCaller[] = buildRpcProviders();
 
     const maybeAccount = account as {
       getChainId?: () => Promise<string>;

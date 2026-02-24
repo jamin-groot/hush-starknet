@@ -3,6 +3,7 @@
 import { ReactNode } from 'react';
 import { StarknetConfig, jsonRpcProvider, argent, braavos } from '@starknet-react/core';
 import { sepolia } from '@starknet-react/chains';
+import { getPrimaryRpcUrl } from '@/lib/rpc-router';
 
 export function StarknetProvider({ children }: { children: ReactNode }) {
   return (
@@ -11,7 +12,7 @@ export function StarknetProvider({ children }: { children: ReactNode }) {
       chains={[sepolia]}
       provider={jsonRpcProvider({
         rpc: () => ({
-          nodeUrl: 'https://starknet-sepolia-rpc.publicnode.com',
+          nodeUrl: getPrimaryRpcUrl(),
         }),
       })}
       connectors={[

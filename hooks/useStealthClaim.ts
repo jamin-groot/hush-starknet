@@ -11,19 +11,19 @@ import {
   validateAndParseAddress,
 } from 'starknet';
 import { normalizeStealthPrivateKey, type StealthMetadata } from '@/lib/stealth';
+import { selectRpcProvider } from '@/lib/rpc-router';
+import {
+  computeSpendableWei,
+  hasPositiveReceiverDelta,
+  pickTransferAmountWei,
+} from '@/lib/stealth-claim-utils';
 
 const STRK_ADDRESS =
   '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
 const STRK_DECIMALS = 18;
-const CLAIM_RPC_ENDPOINTS = [
-  process.env.NEXT_PUBLIC_STARKNET_RPC_URL,
-  process.env.NEXT_PUBLIC_SEPOLIA_RPC_URL,
-  'https://starknet-sepolia-rpc.publicnode.com',
-  'https://rpc.starknet-testnet.lava.build:443',
-].filter((value): value is string => Boolean(value && value.trim()));
 const MAX_POLL_ATTEMPTS = 40;
 const POLL_INTERVAL_MS = 3000;
-const FEE_RESERVE_WEI = BigInt(20_000_000_000_000_000); // 0.02 STRK
+const CLAIM_SAFETY_BUFFER_WEI = BigInt(2_000_000_000_000_000); // 0.002 STRK
 
 const ERC20_ABI = [
   {
@@ -120,22 +120,9 @@ const waitForTransaction = async (provider: RpcProvider, transactionHash: string
   throw new Error('Transaction confirmation timed out');
 };
 
-const pickProvider = async (): Promise<RpcProvider> => {
-  let lastError: unknown = null;
-  for (const nodeUrl of CLAIM_RPC_ENDPOINTS) {
-    const provider = new RpcProvider({ nodeUrl });
-    try {
-      await provider.getChainId();
-      return provider;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw new Error(
-    `No Starknet RPC endpoint available for stealth claim. Last error: ${
-      lastError instanceof Error ? lastError.message : 'unknown'
-    }`
-  );
+const pickProvider = async (): Promise<{ provider: RpcProvider; nodeUrl: string }> => {
+  const selected = await selectRpcProvider();
+  return { provider: selected.provider, nodeUrl: selected.nodeUrl };
 };
 
 const parseUint256FromCall = (result: unknown): bigint => {
@@ -155,6 +142,13 @@ const parseUint256FromCall = (result: unknown): bigint => {
     }
   }
   throw new Error('Unexpected Uint256 response while reading stealth balance');
+};
+
+const toEstimatedFeeWei = (value: { overall_fee?: bigint } | null | undefined): bigint => {
+  if (!value || typeof value.overall_fee !== 'bigint') {
+    return BigInt(0);
+  }
+  return value.overall_fee;
 };
 
 const readStealthStrkBalanceWei = async (provider: RpcProvider, address: string): Promise<bigint> => {
@@ -219,8 +213,10 @@ export function useStealthClaim() {
       if (normalizeAddressForLogs(recipientAddress) === normalizeAddressForLogs(stealthAddress)) {
         throw new Error('Claim recipient cannot be the stealth account address');
       }
-      const provider = await pickProvider();
+      const { provider, nodeUrl } = await pickProvider();
+      console.log('[hush:stealth-claim-rpc-provider]', { nodeUrl });
       const normalizedStealthPrivateKey = normalizeStealthPrivateKey(params.stealth.stealthPrivateKey);
+      const preDeployStealthBalanceWei = await readStealthStrkBalanceWei(provider, stealthAddress);
       const account = new Account({
         provider,
         address: stealthAddress,
@@ -229,6 +225,7 @@ export function useStealthClaim() {
       });
 
       let deploymentHash: string | undefined;
+      let deployFeeWei = BigInt(0);
       let alreadyDeployed = true;
       try {
         await provider.getClassHashAt(stealthAddress);
@@ -237,6 +234,24 @@ export function useStealthClaim() {
       }
 
       if (!alreadyDeployed) {
+        console.log('[hush:stealth-claim-lifecycle:deploy-pending]', { stealthAddress });
+        const deployFeeEstimate = await (account as {
+          estimateAccountDeployFee: (args: {
+            classHash: string;
+            constructorCalldata: string[];
+            addressSalt: string;
+            contractAddress: string;
+          }, details?: { version?: ETransactionVersion }) => Promise<{ overall_fee: bigint }>;
+        }).estimateAccountDeployFee({
+          classHash: params.stealth.classHash,
+          constructorCalldata: CallData.compile({ publicKey: params.stealth.stealthPublicKey }),
+          addressSalt: params.stealth.salt,
+          contractAddress: stealthAddress,
+        }, {
+          version: ETransactionVersion.V3,
+        });
+        deployFeeWei = toEstimatedFeeWei(deployFeeEstimate);
+
         const deployResult = await (account as {
           deployAccount: (args: {
             classHash: string;
@@ -259,16 +274,57 @@ export function useStealthClaim() {
         }
         setDeployTxHash(deploymentHash);
         await waitForTransaction(provider, deploymentHash);
+        console.log('[hush:stealth-claim-lifecycle:deploy-confirmed]', {
+          deployTxHash: deploymentHash,
+          estimatedDeployFee: deployFeeWei.toString(),
+        });
       }
 
       const requestedWei = toWei(params.amount);
       const receiverBalanceBeforeWei = await readStealthStrkBalanceWei(provider, recipientAddress);
-      const onchainBalanceWei = await readStealthStrkBalanceWei(provider, stealthAddress);
-      const spendableWei = onchainBalanceWei > FEE_RESERVE_WEI ? onchainBalanceWei - FEE_RESERVE_WEI : BigInt(0);
-      const transferWei = requestedWei < spendableWei ? requestedWei : spendableWei;
-      if (transferWei <= BigInt(0)) {
-        throw new Error('Stealth account balance is too low to sweep after fees');
+      const initialStealthBalanceWei = await readStealthStrkBalanceWei(provider, stealthAddress);
+      const plannedTransferWei =
+        requestedWei < initialStealthBalanceWei ? requestedWei : initialStealthBalanceWei;
+      if (plannedTransferWei <= BigInt(0)) {
+        throw new Error('Insufficient claimable balance');
       }
+
+      const transferFeeEstimate = await (account as {
+        estimateInvokeFee: (calls: {
+          contractAddress: string;
+          entrypoint: string;
+          calldata: string[];
+        }[], details?: { version?: ETransactionVersion }) => Promise<{ overall_fee: bigint }>;
+      }).estimateInvokeFee([
+        {
+          contractAddress: STRK_ADDRESS,
+          entrypoint: 'transfer',
+          calldata: CallData.compile({
+            recipient: recipientAddress,
+            amount: cairo.uint256(plannedTransferWei),
+          }),
+        },
+      ], {
+        version: ETransactionVersion.V3,
+      });
+
+      const estimatedTransferFeeWei = toEstimatedFeeWei(transferFeeEstimate);
+      const spendableWei = computeSpendableWei({
+        balanceWei: preDeployStealthBalanceWei,
+        deployFeeWei,
+        transferFeeWei: estimatedTransferFeeWei,
+        safetyBufferWei: CLAIM_SAFETY_BUFFER_WEI,
+      });
+      if (spendableWei <= BigInt(0)) {
+        throw new Error('Insufficient claimable balance');
+      }
+      const transferWei = pickTransferAmountWei(requestedWei, spendableWei);
+      console.log('[hush:stealth-claim-fee-plan]', {
+        nodeUrl,
+        estimatedFee: estimatedTransferFeeWei.toString(),
+        spendable: spendableWei.toString(),
+        transferAmount: transferWei.toString(),
+      });
 
       const amountUint256 = cairo.uint256(transferWei);
       const contract = new Contract({
@@ -286,10 +342,26 @@ export function useStealthClaim() {
 
       let optionalSweepTxHash: string | undefined;
       const remainingAfterClaimWei = await readStealthStrkBalanceWei(provider, stealthAddress);
+      const sweepFeeEstimate = await (account as {
+        estimateInvokeFee: (calls: {
+          contractAddress: string;
+          entrypoint: string;
+          calldata: string[];
+        }[], details?: { version?: ETransactionVersion }) => Promise<{ overall_fee: bigint }>;
+      }).estimateInvokeFee([
+        {
+          contractAddress: STRK_ADDRESS,
+          entrypoint: 'transfer',
+          calldata: CallData.compile({
+            recipient: recipientAddress,
+            amount: cairo.uint256(remainingAfterClaimWei),
+          }),
+        },
+      ], {
+        version: ETransactionVersion.V3,
+      });
       const sweepableWei =
-        remainingAfterClaimWei > FEE_RESERVE_WEI * BigInt(2)
-          ? remainingAfterClaimWei - FEE_RESERVE_WEI
-          : BigInt(0);
+        remainingAfterClaimWei - toEstimatedFeeWei(sweepFeeEstimate) - CLAIM_SAFETY_BUFFER_WEI;
 
       if (sweepableWei > BigInt(0)) {
         const sweepAmountUint256 = cairo.uint256(sweepableWei);
@@ -302,7 +374,11 @@ export function useStealthClaim() {
       }
 
       const receiverBalanceAfterWei = await readStealthStrkBalanceWei(provider, recipientAddress);
-      if (receiverBalanceAfterWei <= receiverBalanceBeforeWei) {
+      if (!hasPositiveReceiverDelta(receiverBalanceBeforeWei, receiverBalanceAfterWei)) {
+        console.log('[hush:stealth-claim-status:failure]', {
+          transactionHash: transferHash,
+          status: 'receiver-delta-zero',
+        });
         throw new Error('Stealth claim transfer confirmed but receiver balance did not increase');
       }
 

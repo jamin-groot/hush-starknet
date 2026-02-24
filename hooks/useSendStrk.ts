@@ -2,17 +2,14 @@
 
 import { useCallback, useState } from 'react';
 import { useAccount } from '@starknet-react/core';
-import { cairo, Contract, RpcProvider, validateAndParseAddress } from 'starknet';
+import { cairo, Contract, validateAndParseAddress } from 'starknet';
 import type { Transaction } from '@/lib/blockchain';
 import { useRealtimeStore } from '@/store/realtimeStore';
+import { buildRpcProviders } from '@/lib/rpc-router';
 
 const STRK_ADDRESS =
   '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
 const STRK_DECIMALS = 18;
-const RPC_ENDPOINTS = [
-  'https://starknet-sepolia-rpc.publicnode.com',
-  'https://rpc.starknet-testnet.lava.build:443',
-] as const;
 const FEE_BUFFER_WEI = BigInt(5_000_000_000_000_000); // 0.005 STRK buffer for fees
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_ATTEMPTS = 20;
@@ -105,10 +102,13 @@ const isFailureStatus = (status: unknown): boolean => {
 };
 
 const resolveTransaction = async (transactionHash: string): Promise<void> => {
+  const providers = buildRpcProviders();
+  if (providers.length === 0) {
+    throw new Error('No RPC provider configured for transaction status resolution');
+  }
   for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt += 1) {
-    for (const nodeUrl of RPC_ENDPOINTS) {
+    for (const provider of providers) {
       try {
-        const provider = new RpcProvider({ nodeUrl });
         const status = await provider.getTransactionStatus(transactionHash);
 
         if (isFailureStatus(status)) {

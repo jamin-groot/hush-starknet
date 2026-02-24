@@ -3,15 +3,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAccount } from '@starknet-react/core';
 import { CallData, RpcProvider } from 'starknet';
+import { buildRpcProviders } from '@/lib/rpc-router';
 
 const STRK_ADDRESS =
   '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
 const STRK_DECIMALS = 18;
 const STARKNET_SEPOLIA_CHAIN_ID = '0x534e5f5345504f4c4941';
-const RPC_ENDPOINTS = [
-  'https://starknet-sepolia-rpc.publicnode.com',
-  'https://rpc.starknet-testnet.lava.build:443',
-] as const;
 
 type ContractCaller = {
   callContract: (request: {
@@ -84,19 +81,18 @@ export function useTokenBalance() {
     setLoading(true);
 
     try {
-      const callers: ContractCaller[] = [
-        ...RPC_ENDPOINTS.map((nodeUrl) => new RpcProvider({ nodeUrl })),
-      ];
-
       if (account && typeof account.callContract === 'function') {
         const chainId = await account.getChainId();
         if (chainId !== STARKNET_SEPOLIA_CHAIN_ID) {
           setBalance('0.0000');
           return;
         }
-
+      }
+      const callers: ContractCaller[] = [];
+      if (account && typeof account.callContract === 'function') {
         callers.push(account as unknown as ContractCaller);
       }
+      callers.push(...buildRpcProviders());
 
       let rawBalance: bigint | null = null;
 
