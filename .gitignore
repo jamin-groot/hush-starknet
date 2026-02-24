@@ -6,4 +6,5 @@ dist
 build
 .DS_Store
 data/privacy-store.json
+tsconfig.tsbuildinfo
 
