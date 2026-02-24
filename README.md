@@ -2,6 +2,19 @@
 
 Hush is a privacy-focused payment hub on Starknet Sepolia. It supports STRK transfers, optional encrypted transaction notes, realtime dashboard synchronization, and recipient-side decryption for private messages.
 
+## Production Hardening (Stealth)
+
+- Dynamic claim fee estimation with spendable calculation (`deployFee + transferFee + safetyBuffer`)
+- Dedicated RPC routing via env-configured primary + fallback provider chain
+- Supabase-backed metadata persistence (replacing local `privacy-store.json`)
+- Wallet challenge/session authentication for privacy write/read APIs
+- Encrypted identity backup + rehydration support for new devices
+
+See:
+
+- `docs/STEALTH_PRODUCTION_HARDENING.md`
+- `docs/sql/supabase-stealth-hardening.sql`
+
 ## Core Features
 
 - Wallet connection with Argent/Braavos
@@ -78,7 +91,7 @@ API routes:
 
 ## Notes
 
-- `data/privacy-store.json` is gitignored and used only for local/dev persistence.
+- `data/privacy-store.json` is a legacy dev artifact; production persistence uses Supabase metadata tables.
 - This is an MVP architecture intended for hackathon/dev speed; production should use hardened key custody, auth, and durable backend storage.
 # Hush - Privacy-First Payments on Starknet
 
